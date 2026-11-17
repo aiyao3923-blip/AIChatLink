@@ -1,0 +1,504 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { defaultConfig, loadConfig, parseConfigPath } from "../../src/config.js";
+import type { CommandResolverDependencies } from "../../src/launch/command-spec.js";
+
+const windowsPaths = path.win32;
+const nodeExecutable = windowsPaths.resolve("C:\\Program Files", "nodejs", "node.exe");
+const appData = windowsPaths.resolve("C:\\Users", "aichatlink", "AppData", "Roaming");
+const localAppData = windowsPaths.resolve("C:\\Users", "aichatlink", "AppData", "Local");
+const userProfile = windowsPaths.resolve("C:\\Users", "aichatlink");
+const codexEntrypoint = windowsPaths.resolve(
+  appData,
+  "npm",
+  "node_modules",
+  "@openai",
+  "codex",
+  "bin",
+  "codex.js"
+);
+const kimiEntrypoint = windowsPaths.resolve(
+  appData,
+  "npm",
+  "node_modules",
+  "@moonshot-ai",
+  "kimi-code",
+  "dist",
+  "main.mjs"
+);
+const grokExecutable = windowsPaths.resolve(userProfile, ".grok", "bin", "grok.exe");
+const hermesExecutable = windowsPaths.resolve(
+  localAppData,
+  "hermes",
+  "hermes-agent",
+  "venv",
+  "Scripts",
+  "hermes.exe"
+);
+const claudeExecutable = windowsPaths.resolve(userProfile, ".local", "bin", "claude.exe");
+
+function commandDependencies(additionalFiles: readonly string[] = []): CommandResolverDependencies {
+  const files = new Set(
+    [nodeExecutable, codexEntrypoint, kimiEntrypoint, grokExecutable, hermesExecutable, claudeExecutable, ...additionalFiles].map((candidate) =>
+      windowsPaths.normalize(candidate).toLowerCase()
+    )
+  );
+  return {
+    platform: "win32",
+    env: {
+      APPDATA: appData,
+      LOCALAPPDATA: localAppData,
+      USERPROFILE: userProfile,
+      PATH: windowsPaths.resolve("C:\\Tools")
+    },
+    execPath: nodeExecutable,
+    isFile: (candidate) => files.has(windowsPaths.normalize(candidate).toLowerCase())
+  };
+}
+
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories.splice(0).map((directory) =>
+      rm(directory, { recursive: true, force: true })
+    )
+  );
+});
+
+async function writeConfig(value: unknown): Promise<{ directory: string; configPath: string }> {
+  const directory = await mkdtemp(path.join(tmpdir(), "aichatlink-config-"));
+  temporaryDirectories.push(directory);
+  const configPath = path.join(directory, "aichatlink.json");
+  await writeFile(configPath, JSON.stringify(value), "utf8");
+  return { directory, configPath };
+}
+
+function validConfig(): Record<string, unknown> {
+  return {
+    transport: "structured",
+    server: { host: "127.0.0.1", port: 4_310 },
+    storage: { path: ".aichatlink/aichatlink.db" },
+    agents: {
+      codex: { command: "codex", cwd: ".", enabled: true },
+      grok: { command: "grok", cwd: ".", enabled: true },
+      kimi: { command: "kimi", cwd: ".", enabled: true }
+    }
+  };
+}
+
+describe("AIChatLink configuration", () => {
+  it("uses loopback-only defaults and resolves local paths when loaded", async () => {
+    const cwd = path.resolve("aichatlink-test-workspace");
+    const dependencies = commandDependencies();
+    const defaults = defaultConfig(cwd, dependencies);
+    const config = await loadConfig(undefined, cwd, dependencies);
+
+    expect(defaults.transport).toBe("structured");
+    expect(defaults.server).toEqual({ host: "127.0.0.1", port: 4_310 });
+    expect(defaults.storage.path).toBe(".aichatlink/aichatlink.db");
+    expect(defaults.limits.contextCharacters).toBe(1_000_000);
+    expect(defaults.limits.steersPerSubjectTurn).toBe(3);
+    expect(defaults.timeouts.watchMs).toBe(120_000);
+    expect(defaults.agents.codex!.command).toEqual({
+      executable: nodeExecutable,
+      prefixArgs: [codexEntrypoint]
+    });
+    expect(defaults.agents.grok!.command).toEqual({ executable: grokExecutable, prefixArgs: [] });
+    expect(defaults.agents.claude!.command).toEqual({ executable: claudeExecutable, prefixArgs: [] });
+    expect(config.server).toEqual({ host: "127.0.0.1", port: 4_310 });
+    expect(config.storage.path).toBe(path.join(cwd, ".aichatlink", "aichatlink.db"));
+    expect(config.limits.contextCharacters).toBe(1_000_000);
+    expect(Object.values(config.agents).map((agent) => agent.cwd)).toEqual([cwd, cwd, cwd]);
+  });
+
+  it("loads a strict config and resolves paths relative to the config file", async () => {
+    const { directory, configPath } = await writeConfig(validConfig());
+
+    const config = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(config.transport).toBe("structured");
+    expect(config.server.host).toBe("127.0.0.1");
+    expect(config.storage.path).toBe(path.join(directory, ".aichatlink", "aichatlink.db"));
+    expect(config.agents.codex!.cwd).toBe(directory);
+    expect(config.agents.grok!.cwd).toBe(directory);
+    expect(config.agents.kimi!.cwd).toBe(directory);
+  });
+
+  it("lets agents inherit the room workspace and keeps explicit overrides", async () => {
+    const config = validConfig();
+    config.workspace = "D:/Work/AIChatLink";
+    config.agents = {
+      codex: { command: "codex", enabled: true },
+      grok: { command: "grok", cwd: "D:/Work/Other", enabled: true },
+      kimi: { command: "kimi", enabled: true }
+    };
+    const { directory, configPath } = await writeConfig(config);
+
+    const loaded = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(loaded.workspace).toBe(windowsPaths.resolve(directory, "D:/Work/AIChatLink"));
+    expect(loaded.agents.codex!.cwd).toBe(loaded.workspace);
+    expect(loaded.agents.kimi!.cwd).toBe(loaded.workspace);
+    expect(loaded.agents.grok!.cwd).toBe(windowsPaths.resolve(directory, "D:/Work/Other"));
+    expect(loaded.assistant).toBeUndefined();
+  });
+
+  it("falls back to the config directory when neither workspace nor cwd is set", async () => {
+    const config = validConfig();
+    config.agents = {
+      codex: { command: "codex", enabled: true },
+      grok: { command: "grok", cwd: ".", enabled: true },
+      kimi: { command: "kimi", cwd: ".", enabled: true }
+    };
+    const { directory, configPath } = await writeConfig(config);
+
+    const loaded = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(loaded.workspace).toBeUndefined();
+    expect(loaded.agents.codex!.cwd).toBe(directory);
+  });
+
+  it("lets the room assistant inherit the workspace too", async () => {
+    const config = validConfig();
+    config.workspace = "D:/Work/AIChatLink";
+    config.assistant = {
+      enabled: true,
+      brain: { driver: "codex", command: "codex" }
+    };
+    const { directory, configPath } = await writeConfig(config);
+
+    const loaded = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(loaded.assistant?.brain.cwd).toBe(windowsPaths.resolve(directory, "D:/Work/AIChatLink"));
+  });
+
+  it("upgrades the retired 48k generated context default but preserves custom budgets", async () => {
+    const legacy = validConfig();
+    legacy.limits = { contextCharacters: 48_000 };
+    const legacyFile = await writeConfig(legacy);
+    const upgraded = await loadConfig(
+      legacyFile.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(upgraded.limits.contextCharacters).toBe(1_000_000);
+
+    const custom = validConfig();
+    custom.limits = { contextCharacters: 96_000 };
+    const customFile = await writeConfig(custom);
+    const preserved = await loadConfig(
+      customFile.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(preserved.limits.contextCharacters).toBe(96_000);
+  });
+
+  it("upgrades exact legacy generated limit and timeout defaults but preserves custom values", async () => {
+    const legacy = validConfig();
+    legacy.limits = {
+      messageCharacters: 32_768,
+      rootTurns: 24,
+      hopCount: 12,
+      actorCallsPerRoot: 8,
+      sseBytes: 524_288
+    };
+    legacy.timeouts = { firstEventMs: 90_000, idleMs: 120_000 };
+    const legacyFile = await writeConfig(legacy);
+    const upgraded = await loadConfig(
+      legacyFile.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(upgraded.limits.messageCharacters).toBe(131_072);
+    expect(upgraded.limits.rootTurns).toBe(48);
+    expect(upgraded.limits.hopCount).toBe(24);
+    expect(upgraded.limits.actorCallsPerRoot).toBe(16);
+    expect(upgraded.limits.sseBytes).toBe(2_097_152);
+    expect(upgraded.timeouts.firstEventMs).toBe(180_000);
+    expect(upgraded.timeouts.idleMs).toBe(300_000);
+
+    const custom = validConfig();
+    custom.limits = { rootTurns: 30, hopCount: 9, actorCallsPerRoot: 5, sseBytes: 600_000 };
+    custom.timeouts = { firstEventMs: 45_000, idleMs: 150_000 };
+    const customFile = await writeConfig(custom);
+    const preserved = await loadConfig(
+      customFile.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(preserved.limits.rootTurns).toBe(30);
+    expect(preserved.limits.hopCount).toBe(9);
+    expect(preserved.limits.actorCallsPerRoot).toBe(5);
+    expect(preserved.limits.sseBytes).toBe(600_000);
+    expect(preserved.timeouts.firstEventMs).toBe(45_000);
+    expect(preserved.timeouts.idleMs).toBe(150_000);
+  });
+
+  it("treats the agents map as the explicit room roster", async () => {
+    const omitted = await writeConfig({});
+    const omittedConfig = await loadConfig(omitted.configPath, process.cwd(), commandDependencies());
+
+    expect(Object.values(omittedConfig.agents).map((agent) => agent.cwd)).toEqual([
+      omitted.directory,
+      omitted.directory,
+      omitted.directory
+    ]);
+
+    const partial = await writeConfig({
+      agents: {
+        codex: { command: "codex", cwd: "codex-work", enabled: true }
+      }
+    });
+    const partialConfig = await loadConfig(partial.configPath, process.cwd(), commandDependencies());
+
+    expect(Object.keys(partialConfig.agents)).toEqual(["codex"]);
+    expect(partialConfig.agents.codex!.cwd).toBe(path.join(partial.directory, "codex-work"));
+  });
+
+  it("rejects non-loopback hosts", async () => {
+    const input = validConfig();
+    input.server = { host: "0.0.0.0", port: 4_310 };
+    const { configPath } = await writeConfig(input);
+
+    await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "server.host" })
+        ])
+      }
+    });
+  });
+
+  it.each(["sandbox", "approval", "yolo", "tools"])(
+    "rejects the permission- or policy-type agent field %s",
+    async (field) => {
+      const input = validConfig();
+      const agents = input.agents as Record<string, Record<string, unknown>>;
+      agents.codex = { ...agents.codex, [field]: "forbidden-override" };
+      const { configPath } = await writeConfig(input);
+
+      await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+        code: "INVALID_ENVELOPE",
+        details: {
+          issues: expect.arrayContaining([
+            expect.objectContaining({ path: "agents.codex" })
+          ])
+        }
+      });
+    }
+  );
+
+  it("rejects unknown fields at every strict object boundary", async () => {
+    const input = validConfig();
+    input.unexpected = true;
+    input.storage = { path: ".aichatlink/aichatlink.db", unexpected: true };
+    const { configPath } = await writeConfig(input);
+
+    await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE"
+    });
+  });
+
+  it("rejects the deprecated Direct runtime entry and defaults to structured", async () => {
+    const direct = validConfig();
+    direct.transport = "direct";
+    const directFixture = await writeConfig(direct);
+
+    await expect(loadConfig(directFixture.configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({
+            path: "transport",
+            message: "Direct transport is deprecated and disabled; use structured"
+          })
+        ])
+      }
+    });
+
+    const invalid = validConfig();
+    invalid.transport = "mixed";
+    const invalidFixture = await writeConfig(invalid);
+    await expect(loadConfig(invalidFixture.configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: "transport" })])
+      }
+    });
+  });
+
+  it("does not expose access or native policy configuration", async () => {
+    const input = validConfig();
+    input.access = "unrestricted";
+    const { configPath } = await writeConfig(input);
+
+    await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([expect.objectContaining({ path: "" })])
+      }
+    });
+  });
+
+  it("keeps the configured message limit equal to the fixed REST and MCP wire bound", async () => {
+    const current = validConfig();
+    current.limits = { messageCharacters: 131_072 };
+    const currentFile = await writeConfig(current);
+    const loaded = await loadConfig(
+      currentFile.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(loaded.limits.messageCharacters).toBe(131_072);
+
+    const input = validConfig();
+    input.limits = { messageCharacters: 32_769 };
+    const { configPath } = await writeConfig(input);
+
+    await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "limits.messageCharacters" })
+        ])
+      }
+    });
+  });
+
+  it("normalizes the new command object while retaining legacy command strings", async () => {
+    const input = validConfig();
+    const agents = input.agents as Record<string, Record<string, unknown>>;
+    agents.grok = {
+      command: { executable: grokExecutable, prefixArgs: [] },
+      cwd: ".",
+      enabled: true
+    };
+    const { configPath } = await writeConfig(input);
+
+    const config = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(config.agents.codex!.command).toEqual({ executable: nodeExecutable, prefixArgs: [codexEntrypoint] });
+    expect(config.agents.grok!.command).toEqual({ executable: grokExecutable, prefixArgs: [] });
+  });
+
+  it("loads custom agents with an explicit driver and display name", async () => {
+    const input = validConfig();
+    const agents = input.agents as Record<string, Record<string, unknown>>;
+    agents.rex = {
+      driver: "codex",
+      name: "小R",
+      identity: "专注协议与回归风险的代码评审员",
+      command: "codex",
+      cwd: ".",
+      enabled: true
+    };
+    agents["grok-2"] = { driver: "grok", command: "grok", cwd: ".", enabled: false };
+    agents.hermes = { command: "hermes", cwd: ".", enabled: true };
+    agents.claude = { command: "claude", cwd: ".", enabled: true };
+    const { configPath } = await writeConfig(input);
+
+    const config = await loadConfig(configPath, process.cwd(), commandDependencies());
+
+    expect(config.agents.rex).toMatchObject({
+      driver: "codex",
+      name: "小R",
+      identity: "专注协议与回归风险的代码评审员",
+      enabled: true
+    });
+    expect(config.agents.rex!.command).toEqual({ executable: nodeExecutable, prefixArgs: [codexEntrypoint] });
+    expect(config.agents["grok-2"]).toMatchObject({ driver: "grok", enabled: false });
+    expect(config.agents.hermes).toMatchObject({ driver: "hermes", enabled: true });
+    expect(config.agents.hermes!.command).toEqual({ executable: hermesExecutable, prefixArgs: [] });
+    expect(config.agents.claude).toMatchObject({ driver: "claude", enabled: true });
+    expect(config.agents.claude!.command).toEqual({ executable: claudeExecutable, prefixArgs: [] });
+    expect(config.agents.codex).toMatchObject({ driver: "codex" });
+  });
+
+  it("rejects a custom agent without a driver", async () => {
+    const input = validConfig();
+    const agents = input.agents as Record<string, Record<string, unknown>>;
+    agents.rex = { command: "codex", cwd: ".", enabled: true };
+    const { configPath } = await writeConfig(input);
+
+    await expect(loadConfig(configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ path: "agents.rex.driver" })
+        ])
+      }
+    });
+  });
+
+  it("rejects invalid agent ids and an empty roster", async () => {
+    const invalidId = validConfig();
+    (invalidId.agents as Record<string, unknown>)["bad id"] = { driver: "kimi", command: "kimi", cwd: "." };
+    const invalidFixture = await writeConfig(invalidId);
+    await expect(loadConfig(invalidFixture.configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE"
+    });
+
+    const empty = await writeConfig({ agents: {} });
+    await expect(loadConfig(empty.configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE",
+      details: {
+        issues: expect.arrayContaining([
+          expect.objectContaining({ message: "At least one agent is required" })
+        ])
+      }
+    });
+  });
+
+  it("rejects reserved assistant roster ids and loads a top-level assistant", async () => {
+    const reserved = validConfig();
+    (reserved.agents as Record<string, unknown>).assistant = {
+      driver: "codex",
+      command: "codex",
+      cwd: ".",
+      enabled: true
+    };
+    const reservedFile = await writeConfig(reserved);
+    await expect(loadConfig(reservedFile.configPath, process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE"
+    });
+
+    const withAssistant = validConfig();
+    withAssistant.assistant = {
+      enabled: true,
+      name: "房间助理",
+      brain: { driver: "codex", command: "codex", cwd: "." },
+      extraInstructions: "先 roster"
+    };
+    const { configPath, directory } = await writeConfig(withAssistant);
+    const loaded = await loadConfig(configPath, process.cwd(), commandDependencies());
+    expect(loaded.assistant).toMatchObject({
+      enabled: true,
+      name: "房间助理",
+      extraInstructions: "先 roster"
+    });
+    expect(loaded.assistant?.brain.cwd).toBe(directory);
+  });
+
+  it("parses both supported --config forms and rejects a missing path", () => {
+    expect(parseConfigPath(["node", "aichatlink", "--config", "local.json"])).toBe("local.json");
+    expect(parseConfigPath(["node", "aichatlink", "--config=other.json"])).toBe("other.json");
+    expect(parseConfigPath(["node", "aichatlink"])).toBeUndefined();
+    expect(() => parseConfigPath(["node", "aichatlink", "--config"])).toThrowError(
+      expect.objectContaining({ code: "INVALID_ENVELOPE" })
+    );
+    expect(() => parseConfigPath(["node", "aichatlink", "--config="])).toThrowError(
+      expect.objectContaining({ code: "INVALID_ENVELOPE" })
+    );
+  });
+
+  it("does not treat an explicitly empty config path as the default configuration", async () => {
+    await expect(loadConfig("", process.cwd(), commandDependencies())).rejects.toMatchObject({
+      code: "INVALID_ENVELOPE"
+    });
+  });
+});

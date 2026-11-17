@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "roles": {
+    "pi-lead": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    },
+    "pi-architect": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    },
+    "pi-reviewer": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    },
+    "pi-contrarian": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    },
+    "pi-verifier": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    },
+    "pi-designer": {
+      "model": "deepseek-v4.1-flash",
+      "provider": "newapi",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "newapi"
+      ],
+      "contextFiles": false
+    }
+  }
+}

@@ -1,0 +1,17 @@
+node_modules/
+dist/
+coverage/
+.env
+.env.*
+!.env.example
+/aichatlink.json
+.aichatlink/
+# legacy pre-rename artifacts are archived under tmp/ and stay ignored
+data/
+*.db
+*.db-shm
+*.db-wal
+logs/
+tmp/
+.playwright-cli/
+_tmp/

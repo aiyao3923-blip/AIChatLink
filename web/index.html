@@ -1,0 +1,402 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'self'"
+    >
+    <meta name="color-scheme" content="light dark">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23191711'/%3E%3Ctext x='16' y='21.5' font-family='Noto Serif SC,Georgia,serif' font-size='12' font-weight='600' text-anchor='middle' fill='%23faf9f5' letter-spacing='0.5'%3EAI%3C/text%3E%3C/svg%3E">
+    <title>AIChatLink</title>
+    <link rel="stylesheet" href="/tokens.css?v=0.1.16">
+    <link rel="stylesheet" href="/styles.css?v=0.1.16">
+    <script type="module" src="/app.js?v=0.1.16"></script>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="app-header">
+        <button
+          id="sidebar-toggle"
+          class="sidebar-toggle"
+          type="button"
+          aria-expanded="true"
+          aria-controls="agents-panel"
+          aria-label="收起侧边栏"
+          title="收起侧边栏"
+        >
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <rect x="3.2" y="4.2" width="17.6" height="15.6" rx="2.6"/>
+            <path d="M9.4 4.6v14.8"/>
+          </svg>
+        </button>
+        <div class="brand-lockup">
+          <span class="brand-mark" aria-hidden="true">AI</span>
+          <div>
+            <h1>AIChatLink</h1>
+            <p>Local agent room</p>
+          </div>
+        </div>
+        <div class="roster-strip-wrap">
+          <ul id="agent-list" class="roster-strip" aria-label="Agent 名册"></ul>
+          <span id="agent-count" class="count-pill roster-count" title="可用 / 全部 Agent">0 / 0</span>
+        </div>
+        <div class="header-actions">
+          <span
+            id="connection-dot"
+            class="connection-dot"
+            data-state="bootstrapping"
+            role="status"
+            aria-label="正在载入"
+            title="正在载入"
+          ></span>
+          <button id="memory-toggle" class="icon-action" type="button" aria-label="公共记忆" title="公共记忆">
+            <span aria-hidden="true">◆</span>
+          </button>
+          <button
+            id="assistant-toggle"
+            class="icon-action"
+            type="button"
+            aria-expanded="false"
+            aria-controls="assistant-drawer"
+            aria-label="房间助理"
+            title="房间助理"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M4.5 5.5h15v10h-9l-4.5 3.6v-3.6h-1.5z"/>
+            </svg>
+          </button>
+          <a class="icon-action" href="/setup" aria-label="配置" title="配置">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <circle cx="12" cy="12" r="3.1"/>
+              <path d="M19.4 13.5a7.8 7.8 0 0 0 0-3l1.9-1.5-2-3.4-2.4 1a7.8 7.8 0 0 0-2.6-1.5L14 2.5h-4l-.3 2.6A7.8 7.8 0 0 0 7.1 6.6l-2.4-1-2 3.4 1.9 1.5a7.8 7.8 0 0 0 0 3l-1.9 1.5 2 3.4 2.4-1a7.8 7.8 0 0 0 2.6 1.5l.3 2.6h4l.3-2.6a7.8 7.8 0 0 0 2.6-1.5l2.4 1 2-3.4z"/>
+            </svg>
+          </a>
+          <button id="theme-toggle" class="icon-action theme-toggle" type="button" aria-label="切换到夜间模式" title="切换到夜间模式">☾</button>
+        </div>
+        <div id="global-error" class="global-error" role="alert" hidden></div>
+      </header>
+
+      <aside id="agents-panel" class="side-panel conversations-panel" aria-labelledby="conversations-heading">
+        <section class="conversation-section" aria-labelledby="conversations-heading">
+          <div class="panel-heading conversation-heading">
+            <div>
+              <p class="eyebrow">Conversations</p>
+              <h2 id="conversations-heading">对话</h2>
+            </div>
+            <button
+              id="new-conversation"
+              class="new-conversation"
+              type="button"
+              title="开始一个新对话"
+              aria-label="开始一个新对话"
+            >＋</button>
+          </div>
+          <div
+            id="conversation-groups"
+            class="conversation-groups"
+            aria-label="按工作目录分组的对话"
+          ></div>
+          <button id="show-hidden-conversations" class="show-hidden-conversations" type="button" hidden>显示已隐藏</button>
+        </section>
+      </aside>
+
+      <main class="conversation-panel" aria-label="群组对话">
+        <div id="viewing-banner" class="viewing-banner" role="status" hidden>
+          <span class="viewing-banner-copy">
+            <strong id="viewing-banner-title">查看历史对话</strong>
+            <span id="viewing-banner-note">发送新消息会以这段对话为上下文继续</span>
+          </span>
+          <button id="viewing-banner-exit" class="text-button" type="button">回到当前对话</button>
+        </div>
+        <ol
+          id="timeline"
+          class="timeline"
+          role="log"
+          aria-live="polite"
+          aria-relevant="additions text"
+          aria-label="群组消息与运行事件"
+        >
+          <li id="timeline-empty" class="empty-state">
+            <span class="empty-orbit" aria-hidden="true">◎</span>
+            <h3>房间准备中</h3>
+            <p>连接完成后，可以选择一个 Agent 或使用 @all 并行发起对话。</p>
+          </li>
+        </ol>
+
+        <div id="timeline-actions" class="timeline-actions">
+          <section
+            id="conversation-toc-panel"
+            class="toc-panel"
+            aria-label="对话目录"
+            hidden
+          >
+            <header class="toc-head">
+              <div>
+                <p class="eyebrow">My messages</p>
+                <h2>对话目录</h2>
+              </div>
+              <button id="conversation-toc-close" class="icon-button" type="button" aria-label="关闭对话目录">×</button>
+            </header>
+            <ol id="conversation-toc-list" class="toc-list"></ol>
+          </section>
+          <button
+            id="conversation-toc"
+            class="floating-action"
+            type="button"
+            title="对话目录：只看我发过的消息，点击跳到原位置"
+            aria-label="对话目录"
+            aria-expanded="false"
+            aria-controls="conversation-toc-panel"
+            hidden
+          >
+            <svg class="floating-action-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="5" cy="7" r="1.15" fill="currentColor"/>
+              <circle cx="5" cy="12" r="1.15" fill="currentColor"/>
+              <circle cx="5" cy="17" r="1.15" fill="currentColor"/>
+              <path
+                d="M9 7h10M9 12h10M9 17h10"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <button
+            id="jump-latest"
+            class="floating-action jump-latest"
+            type="button"
+            title="回到最新进度"
+            aria-label="回到最新进度"
+            hidden
+          >
+            <svg class="jump-latest-arrow" viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M12 4.8v13.4m-5.6-5.6 5.6 5.6 5.6-5.6"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span id="jump-latest-count" class="jump-latest-count" hidden></span>
+          </button>
+        </div>
+
+        <form id="composer" class="composer">
+          <div id="reply-context" class="reply-context" hidden>
+            <div>
+              <span class="reply-kicker">正在回复</span>
+              <span id="reply-description"></span>
+            </div>
+            <button id="clear-reply" class="icon-button" type="button" aria-label="取消回复">×</button>
+          </div>
+
+          <section id="runtime-progress" class="runtime-progress" role="status" aria-live="polite" hidden>
+            <span class="runtime-progress-spinner" aria-hidden="true"></span>
+            <div class="runtime-progress-copy">
+              <strong id="runtime-progress-title">正在整理房间上下文</strong>
+              <span id="runtime-progress-detail">准备压缩较早的会话记录</span>
+            </div>
+            <span id="runtime-progress-attempt" class="runtime-progress-attempt"></span>
+          </section>
+
+          <div class="composer-box">
+            <label class="sr-only" for="message-input">消息内容</label>
+            <textarea
+              id="message-input"
+              maxlength="131072"
+              rows="1"
+              required
+              placeholder="给选中的 Agent 发一条消息…"
+            ></textarea>
+          </div>
+
+          <div class="composer-bar">
+            <div class="target-cluster">
+              <button
+                id="target-toggle"
+                class="target-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="target-picker"
+                title="展开或收起 Agent 选择"
+              >
+                <span class="target-label">发送给</span>
+                <strong id="target-summary">@all</strong>
+                <svg class="target-chevron" viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+              </button>
+              <fieldset id="target-picker" class="target-picker" aria-label="发送给" hidden>
+                <legend class="sr-only">发送给</legend>
+                <label class="target-chip target-all-chip">
+                  <input id="target-all" type="checkbox" checked>
+                  <span>@all</span>
+                </label>
+                <span class="target-bulk">
+                  <button id="target-select-all" class="target-bulk-button" type="button">全选</button>
+                  <button id="target-clear" class="target-bulk-button" type="button">清空</button>
+                </span>
+              </fieldset>
+            </div>
+            <button id="composer-workspace" class="composer-workspace" type="button" hidden title="切换工作目录">
+              <span class="composer-workspace-plus" aria-hidden="true">＋</span>
+              <span class="composer-workspace-label">工作目录</span>
+              <span id="composer-workspace-path"></span>
+            </button>
+            <span id="composer-status" class="composer-status" aria-live="polite"></span>
+            <div class="context-controls">
+              <span id="character-count" class="character-count" title="本条消息的字符数" hidden></span>
+              <div
+                id="context-usage"
+                class="context-usage"
+                role="status"
+                aria-live="polite"
+                title="AIChatLink Context Packet 的房间字符估算，不是模型 token 数"
+              >
+                <span class="context-usage-label">上下文</span>
+                <strong id="context-usage-value">读取中</strong>
+                <span class="context-usage-meter" aria-hidden="true">
+                  <span id="context-usage-fill"></span>
+                </span>
+              </div>
+              <button
+                id="compact-context"
+                class="context-compact-button"
+                type="button"
+                title="把较早消息滚动整理为摘要；完整聊天记录仍保留"
+                disabled
+              >压缩会话</button>
+              <button id="send-button" class="send-button" type="submit" disabled>
+                <svg class="send-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2Z" fill="currentColor"/>
+                </svg>
+                <span>发送</span>
+              </button>
+            </div>
+          </div>
+        </form>
+      </main>
+
+      <aside id="assistant-drawer" class="assistant-drawer" hidden>
+        <div class="assistant-drawer-header">
+          <div>
+            <p class="eyebrow">Operator</p>
+            <h2 id="assistant-drawer-title">房间助理</h2>
+            <p id="assistant-status" class="assistant-status">未启用</p>
+          </div>
+          <button id="assistant-close" class="assistant-close" type="button" aria-label="关闭房间助理">×</button>
+        </div>
+        <div id="assistant-guide" class="assistant-guide" hidden>
+          <p>尚未添加房间助理。到 Agent 设置页名册下方打开「房间助理」，保存后重启 AIChatLink。</p>
+          <a class="primary-link" href="/setup#assistant">前往设置</a>
+        </div>
+        <ol id="assistant-timeline" class="assistant-timeline" aria-live="polite"></ol>
+        <form id="assistant-form" class="assistant-form">
+          <div class="composer-box">
+            <label class="sr-only" for="assistant-input">对助理说</label>
+            <textarea
+              id="assistant-input"
+              maxlength="131072"
+              rows="1"
+              placeholder="单独对助理说话，不会发到群里"
+            ></textarea>
+            <div class="composer-toolbar">
+              <button id="assistant-cancel" class="text-button" type="button" hidden>取消</button>
+              <button id="assistant-send" class="send-button" type="submit" disabled>
+                <svg class="send-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2Z" fill="currentColor"/>
+                </svg>
+                <span>发送</span>
+              </button>
+            </div>
+          </div>
+          <p id="assistant-form-status" class="assistant-form-status">Enter 发送 · Shift+Enter 换行</p>
+        </form>
+      </aside>
+
+    </div>
+
+
+    <dialog id="memory-dialog" class="sheet-dialog memory-dialog" aria-labelledby="memory-dialog-title">
+      <header class="sheet-head">
+        <div>
+          <p class="eyebrow">Room memory</p>
+          <h2 id="memory-dialog-title">公共记忆</h2>
+        </div>
+        <button id="memory-close" class="icon-button" type="button" aria-label="关闭公共记忆">×</button>
+      </header>
+      <details id="public-memory-section" class="sidebar-memory" open>
+        <summary>
+          <span>
+            <span class="sidebar-memory-icon" aria-hidden="true">◆</span>
+            固定给整个房间的长期信息
+          </span>
+          <span id="public-memory-count" class="count-pill">0</span>
+        </summary>
+        <div class="sidebar-memory-body">
+          <p class="section-description">显式固定给整个房间的长期信息；普通聊天不会自动写入。</p>
+          <ul id="memory-list" class="record-list"></ul>
+          <form id="memory-form" class="record-form">
+            <div id="memory-replace-banner" class="replace-banner" hidden>
+              <span>正在替换一条公共记忆</span>
+              <button id="memory-replace-cancel" class="text-button" type="button">取消</button>
+            </div>
+            <label for="memory-kind">类型</label>
+            <select id="memory-kind">
+              <option value="fact">事实</option>
+              <option value="decision">决定</option>
+              <option value="preference">偏好</option>
+              <option value="instruction">指令</option>
+              <option value="constraint">约束</option>
+              <option value="note">备注</option>
+            </select>
+            <label for="memory-input">固定一条公共记忆</label>
+            <textarea id="memory-input" maxlength="131072" rows="3" placeholder="写下需要长期保留的群组信息"></textarea>
+            <button id="memory-submit" class="secondary-button" type="submit">固定到房间</button>
+          </form>
+        </div>
+      </details>
+    </dialog>
+
+    <dialog id="workspace-dialog" class="sheet-dialog workspace-dialog" aria-labelledby="workspace-dialog-title">
+      <header class="sheet-head">
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <h2 id="workspace-dialog-title">工作目录</h2>
+        </div>
+        <button id="workspace-close" class="icon-button" type="button" aria-label="关闭工作目录">×</button>
+      </header>
+      <section class="workspace-existing">
+        <p class="sheet-label">已添加的工作目录</p>
+        <ul id="workspace-list" class="workspace-switcher-list" aria-label="已添加的工作目录"></ul>
+      </section>
+      <section class="workspace-browser">
+        <div class="workspace-path-row">
+          <button id="workspace-up" class="icon-button" type="button" aria-label="上一级目录" title="上一级目录">↑</button>
+          <span id="workspace-dialog-path" class="workspace-dialog-path" title=""></span>
+        </div>
+        <div id="workspace-shortcuts" class="workspace-shortcuts" hidden></div>
+        <ul id="workspace-entries" class="workspace-entries" aria-label="子目录"></ul>
+        <div class="workspace-dialog-actions">
+          <span id="workspace-dialog-status" class="workspace-dialog-status" role="status" aria-live="polite"></span>
+          <button id="workspace-use" class="primary-button" type="button">使用此目录</button>
+        </div>
+      </section>
+    </dialog>
+
+    <template id="agent-template">
+      <li class="agent-card"></li>
+    </template>
+    <template id="message-template">
+      <li class="timeline-item"><article class="event-card"></article></li>
+    </template>
+    <template id="turn-template">
+      <li class="timeline-item"><article class="turn-card"></article></li>
+    </template>
+  </body>
+</html>

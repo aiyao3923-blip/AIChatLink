@@ -1,0 +1,1280 @@
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import {
+  createServer,
+  type IncomingMessage,
+  type Server,
+  type ServerResponse
+} from "node:http";
+import type { AddressInfo } from "node:net";
+import path from "node:path";
+
+import {
+  AgentActorIdSchema,
+  ReferenceIdSchema,
+  httpStatusForErrorCode,
+  parseBootstrapResponse,
+  parseCancelTurnRequest,
+  parseCancelTurnResult,
+  parseCompactContextRequest,
+  parseResetContextRequest,
+  parseResumeConversationRequest,
+  parseCompactContextResult,
+  parseConversationList,
+  parseRoomContextResetResult,
+  parseContractOutput,
+  parseCreateMessageAccepted,
+  parseCreateMessageRequest,
+  parseEventsQuery,
+  parseIdentityPage,
+  parseIdentityQuery,
+  parseMemoryPage,
+  parseMemoryQuery,
+  parseRememberIdentityAccepted,
+  parseRememberIdentityRequest,
+  parseRememberMemoryAccepted,
+  parseRememberMemoryRequest,
+  parseRestartAgentAccepted,
+  parseRestartAgentRequest,
+  parseRoomContextUsage,
+  parseRuntimeShutdownAccepted,
+  parseRuntimeShutdownRequest,
+  parseSetupSaveRequest,
+  parseSetupSaveResponse,
+  parseSetupSnapshot,
+  parseRetractIdentityRequest,
+  parseRetractMemoryRequest,
+  parseSupersedeIdentityRequest,
+  parseSupersedeMemoryRequest,
+  parseAssistantCancelRequest,
+  parseAssistantCancelResult,
+  parseAssistantConversationPage,
+  parseAssistantMessageAccepted,
+  parseAssistantMessageRequest,
+  parseAssistantSnapshot,
+  resolveEventCursor,
+  toSafeErrorBody
+} from "../../contracts/index.js";
+import { AIChatLinkError } from "../../core/errors.js";
+import { serveWorkspaceRoute } from "../setup/workspace-routes.js";
+import { createWorkspaceProxy } from "./workspace-proxy.js";
+import { serveWorkspaceHubRoute } from "./workspace-hub-routes.js";
+import type { SseConnection, SseSink } from "../sse/index.js";
+import type {
+  AIChatLinkHttpServerAddress,
+  AIChatLinkHttpServerOptions,
+  McpHttpHandler,
+  WorkspaceProxy
+} from "./types.js";
+
+const LOOPBACK_HOST = "127.0.0.1" as const;
+const DEFAULT_PORT = 4_310;
+// Must comfortably hold one max-length message content (131,072 chars) as
+// escaped JSON UTF-8 plus envelope fields; the server binds loopback only.
+const DEFAULT_BODY_LIMIT = 2 * 1_024 * 1_024;
+const DEFAULT_GRACEFUL_CLOSE_TIMEOUT_MS = 5_000;
+
+interface StaticAsset {
+  readonly fileName:
+    | "index.html"
+    | "app.js"
+    | "agent-roster.js"
+    | "conversation-epoch.js"
+    | "pagination.js"
+    | "reasoning-record.js"
+    | "rich-text.js"
+    | "tool-progress.js"
+    | "usage-format.js"
+    | "styles.css"
+    | "tokens.css"
+    | "setup.html"
+    | "setup.js"
+    | "setup.css";
+  readonly contentType: string;
+}
+
+const STATIC_ASSETS = new Map<string, StaticAsset>([
+  ["/", { fileName: "index.html", contentType: "text/html; charset=utf-8" }],
+  ["/app.js", { fileName: "app.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/agent-roster.js", { fileName: "agent-roster.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/conversation-epoch.js", { fileName: "conversation-epoch.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/pagination.js", { fileName: "pagination.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/reasoning-record.js", { fileName: "reasoning-record.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/rich-text.js", { fileName: "rich-text.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/tool-progress.js", { fileName: "tool-progress.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/usage-format.js", { fileName: "usage-format.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/styles.css", { fileName: "styles.css", contentType: "text/css; charset=utf-8" }],
+  ["/tokens.css", { fileName: "tokens.css", contentType: "text/css; charset=utf-8" }],
+  ["/setup", { fileName: "setup.html", contentType: "text/html; charset=utf-8" }],
+  ["/setup.html", { fileName: "setup.html", contentType: "text/html; charset=utf-8" }],
+  ["/setup.js", { fileName: "setup.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/setup.css", { fileName: "setup.css", contentType: "text/css; charset=utf-8" }]
+]);
+
+class HttpStatusError extends AIChatLinkError {
+  readonly status: number;
+
+  constructor(status: number, code: AIChatLinkError["code"]) {
+    super(code, code);
+    this.name = "HttpStatusError";
+    this.status = status;
+  }
+}
+
+function positiveSafeInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new RangeError(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function listenPort(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 65_535) {
+    throw new RangeError("port must be an integer between 0 and 65535");
+  }
+  return value;
+}
+
+function requestUrl(request: IncomingMessage): URL {
+  try {
+    return new URL(request.url ?? "/", "http://127.0.0.1");
+  } catch {
+    throw new HttpStatusError(400, "INVALID_ENVELOPE");
+  }
+}
+
+function writeJson(response: ServerResponse, status: number, body: unknown): void {
+  const payload = JSON.stringify(body);
+  response.statusCode = status;
+  response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Content-Length", Buffer.byteLength(payload));
+  response.end(payload);
+}
+
+const CONTENT_SECURITY_POLICY =
+  "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; " +
+  "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; " +
+  "form-action 'self'";
+
+function setSecurityHeaders(response: ServerResponse): void {
+  response.setHeader("Content-Security-Policy", CONTENT_SECURITY_POLICY);
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
+}
+
+function writeProblem(
+  response: ServerResponse,
+  status: number,
+  _message: string
+): void {
+  writeJson(response, status, toSafeErrorBody(new AIChatLinkError("INVALID_ENVELOPE", "invalid path")));
+}
+
+function writeError(response: ServerResponse, error: unknown): void {
+  if (response.destroyed || response.writableEnded) {
+    return;
+  }
+  if (response.headersSent) {
+    response.end();
+    return;
+  }
+
+  const status =
+    error instanceof HttpStatusError
+      ? error.status
+      : error instanceof AIChatLinkError
+        ? httpStatusForErrorCode(error.code)
+        : 500;
+  writeJson(response, status, toSafeErrorBody(error));
+}
+
+function validateBrokerOutput<T>(parser: (input: unknown) => T, input: unknown): T {
+  try {
+    return parser(input);
+  } catch (error: unknown) {
+    throw new Error("Broker response failed its AIChatLink output contract", { cause: error });
+  }
+}
+
+function requireJsonContentType(request: IncomingMessage): void {
+  const contentType = request.headers["content-type"];
+  if (
+    typeof contentType !== "string" ||
+    contentType.split(";", 1)[0]?.trim().toLowerCase() !== "application/json"
+  ) {
+    throw new HttpStatusError(415, "INVALID_ENVELOPE");
+  }
+}
+
+function declaredContentLength(request: IncomingMessage): number | undefined {
+  const value = request.headers["content-length"];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !/^\d+$/u.test(value)) {
+    throw new HttpStatusError(400, "INVALID_ENVELOPE");
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new HttpStatusError(413, "MESSAGE_TOO_LARGE");
+  }
+  return parsed;
+}
+
+async function readJsonBody(request: IncomingMessage, maxBytes: number): Promise<unknown> {
+  requireJsonContentType(request);
+  const contentLength = declaredContentLength(request);
+  if (contentLength !== undefined && contentLength > maxBytes) {
+    drainRequest(request);
+    throw new HttpStatusError(413, "MESSAGE_TOO_LARGE");
+  }
+
+  const raw = await new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    let settled = false;
+
+    const cleanup = (): void => {
+      request.removeListener("data", onData);
+      request.removeListener("end", onEnd);
+      request.removeListener("error", onError);
+      request.removeListener("aborted", onAborted);
+    };
+    const fail = (error: unknown): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk: Buffer | string): void => {
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += bytes.length;
+      if (total > maxBytes) {
+        drainRequest(request);
+        fail(new HttpStatusError(413, "MESSAGE_TOO_LARGE"));
+        return;
+      }
+      chunks.push(bytes);
+    };
+    const onEnd = (): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(Buffer.concat(chunks, total));
+    };
+    const onError = (error: Error): void => fail(error);
+    const onAborted = (): void => {
+      const error = new Error("HTTP request aborted by client");
+      error.name = "AbortError";
+      fail(error);
+    };
+
+    request.on("data", onData);
+    request.once("end", onEnd);
+    request.once("error", onError);
+    request.once("aborted", onAborted);
+  });
+
+  if (raw.length === 0) {
+    throw new HttpStatusError(400, "INVALID_ENVELOPE");
+  }
+  try {
+    return JSON.parse(raw.toString("utf8")) as unknown;
+  } catch {
+    throw new HttpStatusError(400, "INVALID_ENVELOPE");
+  }
+}
+
+function drainRequest(request: IncomingMessage): void {
+  const cleanup = (): void => {
+    request.removeListener("end", cleanup);
+    request.removeListener("aborted", cleanup);
+    request.removeListener("error", cleanup);
+    request.removeListener("close", cleanup);
+  };
+  request.once("end", cleanup);
+  request.once("aborted", cleanup);
+  request.once("error", cleanup);
+  request.once("close", cleanup);
+  request.resume();
+}
+
+function rawQuery(searchParams: URLSearchParams): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of searchParams) {
+    if (Object.prototype.hasOwnProperty.call(result, key)) {
+      result[key] = [result[key], value];
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
+function memoryQuery(searchParams: URLSearchParams): ReturnType<typeof parseMemoryQuery> {
+  const input = rawQuery(searchParams);
+  if (typeof input.limit === "string" && /^\d+$/u.test(input.limit)) {
+    input.limit = Number(input.limit);
+  }
+  if (input.includeHistory === "true") input.includeHistory = true;
+  if (input.includeHistory === "false") input.includeHistory = false;
+  return parseMemoryQuery(input);
+}
+
+function identityQuery(searchParams: URLSearchParams): ReturnType<typeof parseIdentityQuery> {
+  const input = rawQuery(searchParams);
+  if (typeof input.limit === "string" && /^\d+$/u.test(input.limit)) {
+    input.limit = Number(input.limit);
+  }
+  if (input.includeHistory === "true") input.includeHistory = true;
+  if (input.includeHistory === "false") input.includeHistory = false;
+  return parseIdentityQuery(input);
+}
+
+function decodePathId(encoded: string, actor = false): string {
+  let value: string;
+  try {
+    value = decodeURIComponent(encoded);
+  } catch {
+    throw new HttpStatusError(400, "INVALID_ENVELOPE");
+  }
+  return parseContractOutput(actor ? AgentActorIdSchema : ReferenceIdSchema, value);
+}
+
+function methodNotAllowed(response: ServerResponse, allowed: readonly string[]): void {
+  response.setHeader("Allow", allowed.join(", "));
+  writeProblem(response, 405, "The method is not supported for this path.");
+}
+
+function nodeResponseSink(response: ServerResponse): SseSink {
+  return {
+    async write(frame, signal) {
+      if (signal.aborted || response.destroyed || response.writableEnded) {
+        const error = new Error("SSE client is closed");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (response.write(frame)) {
+        return;
+      }
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const cleanup = (): void => {
+          response.removeListener("drain", onDrain);
+          response.removeListener("error", onError);
+          response.removeListener("close", onClose);
+          signal.removeEventListener("abort", onAbort);
+        };
+        const finish = (error?: unknown): void => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (error === undefined) resolve();
+          else reject(error);
+        };
+        const onDrain = (): void => finish();
+        const onError = (error: Error): void => finish(error);
+        const onClose = (): void => finish(new Error("SSE client closed"));
+        const onAbort = (): void => {
+          const error = new Error("SSE write aborted");
+          error.name = "AbortError";
+          finish(error);
+        };
+        response.once("drain", onDrain);
+        response.once("error", onError);
+        response.once("close", onClose);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    close() {
+      if (!response.destroyed && !response.writableEnded) {
+        response.end();
+      }
+    }
+  };
+}
+
+function isMissingFile(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+export class AIChatLinkHttpServer {
+  readonly #options: {
+    readonly broker: AIChatLinkHttpServerOptions["broker"];
+    readonly sse: AIChatLinkHttpServerOptions["sse"];
+    readonly host: "127.0.0.1";
+    readonly port: number;
+    readonly staticRoot: string;
+    readonly maxRequestBodyBytes: number;
+    readonly gracefulCloseTimeoutMs: number;
+    readonly mcpHandler?: McpHttpHandler;
+    readonly operatorMcpHandler?: McpHttpHandler;
+    readonly setupApi?: AIChatLinkHttpServerOptions["setupApi"];
+    readonly workspaceApi?: AIChatLinkHttpServerOptions["workspaceApi"];
+    readonly workspaceHub?: AIChatLinkHttpServerOptions["workspaceHub"];
+    readonly workspaceRouting?: AIChatLinkHttpServerOptions["workspaceRouting"];
+    readonly assistantApi?: AIChatLinkHttpServerOptions["assistantApi"];
+    readonly runtimeIdentity?: AIChatLinkHttpServerOptions["runtimeIdentity"];
+    readonly runtimeControl?: AIChatLinkHttpServerOptions["runtimeControl"];
+    readonly knownTargets?: AIChatLinkHttpServerOptions["knownTargets"];
+  };
+  readonly #server: Server;
+  readonly #sseConnections = new Set<SseConnection>();
+  readonly #requestControllers = new Set<AbortController>();
+  readonly #requestDrainWaiters = new Set<() => void>();
+  readonly #proxy: WorkspaceProxy;
+
+  #address: AIChatLinkHttpServerAddress | undefined;
+  #starting: Promise<AIChatLinkHttpServerAddress> | undefined;
+  #closing: Promise<void> | undefined;
+  #draining = false;
+
+  constructor(options: AIChatLinkHttpServerOptions) {
+    const host = options.host ?? LOOPBACK_HOST;
+    if (host !== LOOPBACK_HOST) {
+      throw new RangeError("AIChatLink M0-M2 HTTP server binds only to 127.0.0.1");
+    }
+    this.#options = {
+      broker: options.broker,
+      sse: options.sse,
+      host,
+      port: listenPort(options.port ?? DEFAULT_PORT),
+      staticRoot: path.resolve(options.staticRoot ?? fileURLToPath(new URL("../../../web/", import.meta.url))),
+      maxRequestBodyBytes: positiveSafeInteger(
+        options.maxRequestBodyBytes ?? DEFAULT_BODY_LIMIT,
+        "maxRequestBodyBytes"
+      ),
+      gracefulCloseTimeoutMs: positiveSafeInteger(
+        options.gracefulCloseTimeoutMs ?? DEFAULT_GRACEFUL_CLOSE_TIMEOUT_MS,
+        "gracefulCloseTimeoutMs"
+      ),
+      ...(options.mcpHandler === undefined ? {} : { mcpHandler: options.mcpHandler }),
+      ...(options.operatorMcpHandler === undefined
+        ? {}
+        : { operatorMcpHandler: options.operatorMcpHandler }),
+      ...(options.setupApi === undefined ? {} : { setupApi: options.setupApi }),
+      ...(options.workspaceApi === undefined ? {} : { workspaceApi: options.workspaceApi }),
+      ...(options.workspaceHub === undefined ? {} : { workspaceHub: options.workspaceHub }),
+      ...(options.workspaceRouting === undefined
+        ? {}
+        : { workspaceRouting: options.workspaceRouting }),
+      ...(options.assistantApi === undefined ? {} : { assistantApi: options.assistantApi }),
+      ...(options.runtimeIdentity === undefined
+        ? {}
+        : { runtimeIdentity: options.runtimeIdentity }),
+      ...(options.runtimeControl === undefined ? {} : { runtimeControl: options.runtimeControl }),
+      ...(options.knownTargets === undefined ? {} : { knownTargets: options.knownTargets })
+    };
+    this.#proxy = createWorkspaceProxy({ writeProblem });
+    this.#server = createServer((request, response) => {
+      void this.#handle(request, response).catch((error: unknown) => {
+        writeError(response, error);
+      });
+    });
+  }
+
+  get address(): AIChatLinkHttpServerAddress | undefined {
+    return this.#address;
+  }
+
+  /** Registered targets when the runtime knows them; otherwise the built-in contract list. */
+  #targetOptions(): { knownTargets: readonly string[] } | undefined {
+    const knownTargets = this.#options.knownTargets;
+    return knownTargets === undefined ? undefined : { knownTargets };
+  }
+
+  async start(): Promise<AIChatLinkHttpServerAddress> {
+    if (this.#address) return this.#address;
+    if (this.#starting) return this.#starting;
+    if (this.#closing || this.#draining) throw new Error("AIChatLink HTTP server is closing");
+
+    this.#starting = new Promise<AIChatLinkHttpServerAddress>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        this.#server.removeListener("listening", onListening);
+        this.#starting = undefined;
+        reject(error);
+      };
+      const onListening = (): void => {
+        this.#server.removeListener("error", onError);
+        const address = this.#server.address();
+        if (address === null || typeof address === "string") {
+          this.#starting = undefined;
+          reject(new Error("AIChatLink HTTP server did not return a TCP address"));
+          return;
+        }
+        const port = (address as AddressInfo).port;
+        this.#address = {
+          host: LOOPBACK_HOST,
+          port,
+          origin: `http://${LOOPBACK_HOST}:${port}`
+        };
+        this.#starting = undefined;
+        resolve(this.#address);
+      };
+      this.#server.once("error", onError);
+      this.#server.once("listening", onListening);
+      this.#server.listen(this.#options.port, LOOPBACK_HOST);
+    });
+    return this.#starting;
+  }
+
+  /** Stop accepting product work while retaining the listener as the runtime lease. */
+  beginClose(): void {
+    if (this.#draining) return;
+    this.#draining = true;
+    this.#proxy.closeAll();
+    for (const connection of [...this.#sseConnections]) {
+      connection.close("server_closed");
+    }
+    for (const controller of this.#requestControllers) {
+      controller.abort();
+    }
+  }
+
+  /** Wait for already-started REST work to observe abort without releasing the port lease. */
+  async drain(): Promise<void> {
+    this.beginClose();
+    if (this.#requestControllers.size === 0) return;
+
+    let resolveDrain: (() => void) | undefined;
+    const drained = new Promise<void>((resolve) => {
+      resolveDrain = resolve;
+      this.#requestDrainWaiters.add(resolve);
+    });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        drained,
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(
+            () => reject(new Error("AIChatLink HTTP request drain timed out")),
+            this.#options.gracefulCloseTimeoutMs
+          );
+        })
+      ]);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      if (resolveDrain) this.#requestDrainWaiters.delete(resolveDrain);
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.#closing) return this.#closing;
+    this.beginClose();
+    if (!this.#server.listening && !this.#starting) {
+      this.#address = undefined;
+      return;
+    }
+
+    const operation = (async () => {
+      try {
+        if (this.#starting) {
+          await this.#starting.catch(() => undefined);
+        }
+        const closed = new Promise<void>((resolve, reject) => {
+          this.#server.close((error?: Error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        const closeMcp = Promise.resolve()
+          .then(async () => await this.#options.mcpHandler?.close?.())
+          .finally(() => {
+            // MCP clients can release their last active HTTP request while
+            // handler.close() is running. Such a connection becomes idle
+            // after the first closeIdleConnections() call, so sweep again
+            // before waiting for server.close().
+            this.#server.closeIdleConnections?.();
+          });
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const deadline = new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            this.#server.closeAllConnections?.();
+            reject(new Error("AIChatLink HTTP server graceful close timed out"));
+          }, this.#options.gracefulCloseTimeoutMs);
+        });
+        const results = await Promise.allSettled([
+          Promise.race([closed, deadline]),
+          Promise.race([closeMcp, deadline])
+        ]);
+        if (timeout) clearTimeout(timeout);
+        const failure = results.find(
+          (result): result is PromiseRejectedResult => result.status === "rejected"
+        );
+        if (failure) throw failure.reason;
+      } finally {
+        this.#address = undefined;
+        this.#requestControllers.clear();
+        for (const resolve of this.#requestDrainWaiters) resolve();
+        this.#requestDrainWaiters.clear();
+        this.#sseConnections.clear();
+      }
+    })();
+    this.#closing = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.#closing === operation) {
+        this.#closing = undefined;
+      }
+    }
+  }
+
+  async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const url = requestUrl(request);
+    const method = request.method ?? "GET";
+    setSecurityHeaders(response);
+
+    if (this.#draining) {
+      if (
+        url.pathname === "/api/health" &&
+        method === "GET" &&
+        this.#options.runtimeIdentity !== undefined
+      ) {
+        writeJson(response, 503, {
+          status: "closing",
+          ...this.#options.runtimeIdentity
+        });
+        return;
+      }
+      writeJson(response, 503, toSafeErrorBody(new AIChatLinkError("STORE_UNAVAILABLE", "closing")));
+      return;
+    }
+
+    if (await this.#handleWorkspaceHub(request, response, url, method)) {
+      return;
+    }
+
+    // `?ws=` is hub routing only. The primary workspace stays local; every
+    // other workspace is served by its own runtime on a loopback origin.
+    const workspaceId = url.searchParams.get("ws");
+    if (workspaceId !== null) {
+      const target = this.#options.workspaceRouting?.resolve(workspaceId);
+      if (target === undefined) {
+        writeJson(
+          response,
+          404,
+          toSafeErrorBody(
+            new AIChatLinkError("WORKSPACE_NOT_FOUND", "Workspace is not registered", {
+              workspaceId
+            })
+          )
+        );
+        return;
+      }
+      if (target.kind === "primary") {
+        url.searchParams.delete("ws");
+      } else {
+        // A child runtime is not allowed to expose the hub config, MCP, or
+        // runtime control surface through the proxy.
+        if (
+          url.pathname === "/api/runtime/shutdown" ||
+          url.pathname === "/api/setup" ||
+          url.pathname.startsWith("/api/setup/") ||
+          url.pathname === "/setup" ||
+          url.pathname === "/setup.html" ||
+          url.pathname === "/mcp" ||
+          url.pathname === "/mcp/operator"
+        ) {
+          writeJson(
+            response,
+            404,
+            toSafeErrorBody(
+              new AIChatLinkError("WORKSPACE_NOT_FOUND", "Workspace does not expose this path", {
+                workspaceId
+              })
+            )
+          );
+          return;
+        }
+        if (target.kind === "pending" || target.kind === "failed") {
+          writeJson(
+            response,
+            503,
+            toSafeErrorBody(
+              new AIChatLinkError("WORKSPACE_NOT_READY", "Workspace runtime is not ready", {
+                workspaceId,
+                ...(target.kind === "failed" && target.errorCode !== undefined
+                  ? { errorCode: target.errorCode }
+                  : {})
+              })
+            )
+          );
+          return;
+        }
+        await this.#proxy.forward(request, response, url, target.origin);
+        return;
+      }
+    }
+
+    if (url.pathname === "/mcp" && this.#options.mcpHandler) {
+      if (method !== "GET" && method !== "POST" && method !== "DELETE") {
+        methodNotAllowed(response, ["GET", "POST", "DELETE"]);
+        return;
+      }
+      await this.#options.mcpHandler.handle(request, response);
+      return;
+    }
+
+    if (url.pathname === "/mcp/operator" && this.#options.operatorMcpHandler) {
+      if (method !== "GET" && method !== "POST" && method !== "DELETE") {
+        methodNotAllowed(response, ["GET", "POST", "DELETE"]);
+        return;
+      }
+      await this.#options.operatorMcpHandler.handle(request, response);
+      return;
+    }
+
+    if (url.pathname === "/api/events") {
+      if (method !== "GET") {
+        methodNotAllowed(response, ["GET"]);
+        return;
+      }
+      this.#openSse(request, response, url);
+      return;
+    }
+
+    const abort = new AbortController();
+    this.#requestControllers.add(abort);
+    const onAborted = (): void => abort.abort();
+    const onClosed = (): void => {
+      if (!response.writableEnded) abort.abort();
+    };
+    request.once("aborted", onAborted);
+    response.once("close", onClosed);
+    try {
+      if (url.pathname === "/api/health") {
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        writeJson(response, 200, {
+          ...(await this.#options.broker.health(abort.signal)),
+          ...(this.#options.runtimeIdentity ?? {})
+        });
+        return;
+      }
+      if (url.pathname === "/api/runtime/shutdown") {
+        const runtimeIdentity = this.#options.runtimeIdentity;
+        const runtimeControl = this.#options.runtimeControl;
+        if (
+          runtimeIdentity?.runtimeScopeKey === undefined ||
+          runtimeControl === undefined
+        ) {
+          writeProblem(response, 404, "Runtime control is not available.");
+          return;
+        }
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseRuntimeShutdownRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        if (body.runtimeScopeKey !== runtimeIdentity.runtimeScopeKey) {
+          throw new AIChatLinkError("STORE_CONFLICT", "Runtime scope does not match");
+        }
+        const accepted = parseRuntimeShutdownAccepted({
+          accepted: true,
+          runtimeKey: runtimeIdentity.runtimeKey,
+          runtimeScopeKey: runtimeIdentity.runtimeScopeKey
+        });
+        response.once("finish", () => {
+          setImmediate(() => {
+            void Promise.resolve()
+              .then(async () => await runtimeControl.requestShutdown())
+              .catch((error: unknown) => runtimeControl.onShutdownError?.(error));
+          });
+        });
+        writeJson(response, 202, accepted);
+        return;
+      }
+      if (url.pathname === "/api/bootstrap") {
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseBootstrapResponse,
+            await this.#options.broker.bootstrap(abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/context") {
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseRoomContextUsage,
+            await this.#options.broker.contextUsage(abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/conversations") {
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(parseConversationList, await this.#options.broker.listConversations(abort.signal))
+        );
+        return;
+      }
+      if (url.pathname === "/api/conversations/resume") {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseResumeConversationRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseRoomContextResetResult,
+            await this.#options.broker.resumeConversation(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/context/reset") {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseResetContextRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseRoomContextResetResult,
+            await this.#options.broker.resetContext(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/context/compact") {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseCompactContextRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseCompactContextResult,
+            await this.#options.broker.compactContext(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/setup") {
+        if (!this.#options.setupApi) {
+          writeProblem(response, 404, "The setup API is not available.");
+          return;
+        }
+        if (method === "GET") {
+          writeJson(
+            response,
+            200,
+            validateBrokerOutput(parseSetupSnapshot, await this.#options.setupApi.snapshot(abort.signal))
+          );
+          return;
+        }
+        if (method === "POST") {
+          const body = parseSetupSaveRequest(
+            await readJsonBody(request, this.#options.maxRequestBodyBytes)
+          );
+          writeJson(
+            response,
+            200,
+            validateBrokerOutput(
+              parseSetupSaveResponse,
+              await this.#options.setupApi.save(body, abort.signal)
+            )
+          );
+          return;
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+      if (this.#options.workspaceApi !== undefined) {
+        const workspace = await serveWorkspaceRoute({
+          api: this.#options.workspaceApi,
+          method,
+          url,
+          signal: abort.signal,
+          header: (name) => {
+            const value = request.headers[name];
+            return Array.isArray(value) ? value[0] : value;
+          },
+          readJson: () => readJsonBody(request, this.#options.maxRequestBodyBytes)
+        });
+        if (workspace !== null) {
+          response.setHeader("Cache-Control", "no-store");
+          if (workspace.kind === "method") {
+            return methodNotAllowed(response, workspace.allow);
+          }
+          writeJson(response, 200, workspace.body);
+          return;
+        }
+      }
+      if (url.pathname === "/api/assistant") {
+        if (!this.#options.assistantApi) {
+          writeProblem(response, 404, "The assistant API is not available.");
+          return;
+        }
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(parseAssistantSnapshot, await this.#options.assistantApi.snapshot(abort.signal))
+        );
+        return;
+      }
+      if (url.pathname === "/api/assistant/messages") {
+        if (!this.#options.assistantApi) {
+          writeProblem(response, 404, "The assistant API is not available.");
+          return;
+        }
+        if (method === "GET") {
+          writeJson(
+            response,
+            200,
+            validateBrokerOutput(
+              parseAssistantConversationPage,
+              await this.#options.assistantApi.listMessages(abort.signal)
+            )
+          );
+          return;
+        }
+        if (method === "POST") {
+          const body = parseAssistantMessageRequest(
+            await readJsonBody(request, this.#options.maxRequestBodyBytes)
+          );
+          writeJson(
+            response,
+            200,
+            validateBrokerOutput(
+              parseAssistantMessageAccepted,
+              await this.#options.assistantApi.postMessage(body, abort.signal)
+            )
+          );
+          return;
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+      if (url.pathname === "/api/assistant/cancel") {
+        if (!this.#options.assistantApi) {
+          writeProblem(response, 404, "The assistant API is not available.");
+          return;
+        }
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseAssistantCancelRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseAssistantCancelResult,
+            await this.#options.assistantApi.cancel(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/messages") {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseCreateMessageRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes),
+          this.#targetOptions()
+        );
+        writeJson(
+          response,
+          202,
+          validateBrokerOutput(
+            parseCreateMessageAccepted,
+            await this.#options.broker.createMessage(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/memory") {
+        if (method === "GET") {
+          writeJson(response, 200, validateBrokerOutput(
+            parseMemoryPage,
+            await this.#options.broker.queryMemory(memoryQuery(url.searchParams), abort.signal)
+          ));
+          return;
+        }
+        if (method === "POST") {
+          const body = parseRememberMemoryRequest(
+            await readJsonBody(request, this.#options.maxRequestBodyBytes),
+            this.#targetOptions()
+          );
+          writeJson(response, 201, validateBrokerOutput(
+            parseRememberMemoryAccepted,
+            await this.#options.broker.rememberMemory(body, abort.signal)
+          ));
+          return;
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+      if (url.pathname === "/api/identity") {
+        if (method === "GET") {
+          writeJson(response, 200, validateBrokerOutput(
+            parseIdentityPage,
+            await this.#options.broker.queryIdentity(identityQuery(url.searchParams), abort.signal)
+          ));
+          return;
+        }
+        if (method === "POST") {
+          const body = parseRememberIdentityRequest(
+            await readJsonBody(request, this.#options.maxRequestBodyBytes),
+            this.#targetOptions()
+          );
+          writeJson(response, 201, validateBrokerOutput(
+            parseRememberIdentityAccepted,
+            await this.#options.broker.rememberIdentity(body, abort.signal)
+          ));
+          return;
+        }
+        return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const cancelMatch = /^\/api\/turns\/([^/]+)\/cancel$/u.exec(url.pathname);
+      if (cancelMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const turnId = decodePathId(cancelMatch[1]);
+        const body = parseCancelTurnRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 202, validateBrokerOutput(
+          parseCancelTurnResult,
+          await this.#options.broker.cancelTurn(turnId, body, abort.signal)
+        ));
+        return;
+      }
+
+      const supersedeMatch = /^\/api\/memory\/([^/]+)\/supersede$/u.exec(url.pathname);
+      if (supersedeMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const memoryId = decodePathId(supersedeMatch[1]);
+        const body = parseSupersedeMemoryRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 201, validateBrokerOutput(
+          parseRememberMemoryAccepted,
+          await this.#options.broker.supersedeMemory(memoryId, body, abort.signal)
+        ));
+        return;
+      }
+
+      const retractMatch = /^\/api\/memory\/([^/]+)\/retract$/u.exec(url.pathname);
+      if (retractMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const memoryId = decodePathId(retractMatch[1]);
+        const body = parseRetractMemoryRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 200, validateBrokerOutput(
+          parseRememberMemoryAccepted,
+          await this.#options.broker.retractMemory(memoryId, body, abort.signal)
+        ));
+        return;
+      }
+
+      const supersedeIdentityMatch = /^\/api\/identity\/([^/]+)\/supersede$/u.exec(
+        url.pathname
+      );
+      if (supersedeIdentityMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const identityId = decodePathId(supersedeIdentityMatch[1]);
+        const body = parseSupersedeIdentityRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 201, validateBrokerOutput(
+          parseRememberIdentityAccepted,
+          await this.#options.broker.supersedeIdentity(identityId, body, abort.signal)
+        ));
+        return;
+      }
+
+      const retractIdentityMatch = /^\/api\/identity\/([^/]+)\/retract$/u.exec(url.pathname);
+      if (retractIdentityMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const identityId = decodePathId(retractIdentityMatch[1]);
+        const body = parseRetractIdentityRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 200, validateBrokerOutput(
+          parseRememberIdentityAccepted,
+          await this.#options.broker.retractIdentity(identityId, body, abort.signal)
+        ));
+        return;
+      }
+
+      const restartMatch = /^\/api\/agents\/([^/]+)\/restart$/u.exec(url.pathname);
+      if (restartMatch?.[1]) {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const actorId = decodePathId(restartMatch[1], true);
+        const body = parseRestartAgentRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(response, 202, validateBrokerOutput(
+          parseRestartAgentAccepted,
+          await this.#options.broker.restartAgent(actorId, body, abort.signal)
+        ));
+        return;
+      }
+
+      if (url.pathname.startsWith("/api/")) {
+        writeProblem(response, 404, "The API path does not exist.");
+        return;
+      }
+
+      await this.#serveStatic(method, url.pathname, response);
+    } finally {
+      this.#requestControllers.delete(abort);
+      if (this.#requestControllers.size === 0) {
+        for (const resolve of this.#requestDrainWaiters) resolve();
+        this.#requestDrainWaiters.clear();
+      }
+      request.removeListener("aborted", onAborted);
+      response.removeListener("close", onClosed);
+    }
+  }
+
+  /**
+   * Hub-only workspace registry routes. A child runtime has no hub surface, and
+   * a `ws` parameter on this path is a routing mistake rather than a request
+   * for a workspace.
+   */
+  async #handleWorkspaceHub(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    method: string
+  ): Promise<boolean> {
+    if (url.pathname !== "/api/workspaces" && !url.pathname.startsWith("/api/workspaces/")) {
+      return false;
+    }
+    if (url.searchParams.has("ws") || this.#options.workspaceHub === undefined) {
+      writeJson(
+        response,
+        404,
+        toSafeErrorBody(
+          new AIChatLinkError("WORKSPACE_NOT_FOUND", "Workspace hub route is not available")
+        )
+      );
+      return true;
+    }
+    const abort = new AbortController();
+    this.#requestControllers.add(abort);
+    const onAborted = (): void => abort.abort();
+    const onClosed = (): void => {
+      if (!response.writableEnded) abort.abort();
+    };
+    request.once("aborted", onAborted);
+    response.once("close", onClosed);
+    try {
+      const outcome = await serveWorkspaceHubRoute({
+        api: this.#options.workspaceHub,
+        method,
+        url,
+        signal: abort.signal,
+        header: (name) => {
+          const value = request.headers[name];
+          return Array.isArray(value) ? value[0] : value;
+        },
+        readJson: () => readJsonBody(request, this.#options.maxRequestBodyBytes)
+      });
+      if (outcome === null) {
+        writeProblem(response, 404, "The workspace path does not exist.");
+        return true;
+      }
+      response.setHeader("Cache-Control", "no-store");
+      if (outcome.kind === "method") {
+        methodNotAllowed(response, outcome.allow);
+        return true;
+      }
+      writeJson(response, 200, outcome.body);
+      return true;
+    } finally {
+      this.#requestControllers.delete(abort);
+      if (this.#requestControllers.size === 0) {
+        for (const resolve of this.#requestDrainWaiters) resolve();
+        this.#requestDrainWaiters.clear();
+      }
+      request.removeListener("aborted", onAborted);
+      response.removeListener("close", onClosed);
+    }
+  }
+
+  #openSse(request: IncomingMessage, response: ServerResponse, url: URL): void {
+    const query = parseEventsQuery(rawQuery(url.searchParams));
+    const afterSeq = resolveEventCursor({
+      ...(query.afterSeq === undefined ? {} : { afterSeq: query.afterSeq }),
+      lastEventId: request.headers["last-event-id"]
+    });
+
+    const clientAbort = new AbortController();
+    const onClientClose = (): void => clientAbort.abort();
+    request.once("aborted", onClientClose);
+    response.once("close", onClientClose);
+    if (request.aborted || request.destroyed || response.destroyed) {
+      clientAbort.abort();
+      throw new Error("SSE client disconnected before the stream opened");
+    }
+
+    response.statusCode = 200;
+    response.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    response.setHeader("Cache-Control", "no-cache, no-transform");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+
+    const connection = this.#options.sse.open({
+      roomId: this.#options.broker.roomId,
+      afterSeq,
+      sink: nodeResponseSink(response),
+      signal: clientAbort.signal
+    });
+    this.#sseConnections.add(connection);
+    void connection.closed.finally(() => {
+      request.removeListener("aborted", onClientClose);
+      response.removeListener("close", onClientClose);
+      this.#sseConnections.delete(connection);
+    });
+  }
+
+  async #serveStatic(method: string, pathname: string, response: ServerResponse): Promise<void> {
+    const asset = STATIC_ASSETS.get(pathname);
+    if (!asset) {
+      writeProblem(response, 404, "The static path does not exist.");
+      return;
+    }
+    if (method !== "GET" && method !== "HEAD") {
+      methodNotAllowed(response, ["GET", "HEAD"]);
+      return;
+    }
+
+    let contents: Buffer;
+    try {
+      contents = await readFile(path.join(this.#options.staticRoot, asset.fileName));
+    } catch (error: unknown) {
+      if (isMissingFile(error)) {
+        writeProblem(response, 404, "The static asset is not built.");
+        return;
+      }
+      throw error;
+    }
+
+    response.statusCode = 200;
+    response.setHeader("Content-Type", asset.contentType);
+    response.setHeader("Content-Length", contents.length);
+    response.setHeader("Cache-Control", "no-cache");
+    if (method === "HEAD") response.end();
+    else response.end(contents);
+  }
+}
+
+export function createAIChatLinkHttpServer(options: AIChatLinkHttpServerOptions): AIChatLinkHttpServer {
+  return new AIChatLinkHttpServer(options);
+}

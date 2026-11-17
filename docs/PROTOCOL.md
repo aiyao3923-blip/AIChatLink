@@ -1,0 +1,807 @@
+# AIChatLink 消息与路由协议
+
+状态：Draft v0.1
+协议名：AIChatLink Envelope
+首版 schema：`aichatlink.event/0.1`
+
+## 1. 设计目标
+
+协议需要同时满足：
+
+- 浏览器、Broker、全部已配置 CLI 使用同一语义事件；
+- 正常 Adapter invocation/会话流程中的 actor 由 binding 决定，正文和工具参数不能指定 sender；
+- 所有消息在群内可见，但只有明确目标被唤醒；
+- Web/REST 在 active Structured 模式表达用户或本地客户端路由；AIChatLink MCP `send/publish/ask/collect/read` 提供 Agent 当前回合的派发、公开、续收与补读；deprecated Direct 只保留兼容语义；
+- 可重放的 durable event 与高频 transient delta 分离；
+- 原生 CLI 事件可以扩展，而不把核心绑定到某个 CLI schema；
+- 将来可以映射到 A2A Message/Task/Artifact，但首版不承担完整 A2A 生命周期。
+
+运行合同：存储/历史 Envelope 可出现 `direct | structured`，但公开运行配置只接受 `structured`。Direct 标记为 deprecated，配置解析、Adapter factory 与 runtime constructor 均拒绝启动。同一次运行全部已配置 Agent 使用 Structured；REST、MCP 和单 Turn 都不能覆盖，也不允许自动 fallback。`access` 是内部固定值 unrestricted，不进入请求、Envelope 或可变数据库策略。
+
+## 2. Envelope
+
+```ts
+type AIChatLinkEnvelope = {
+  schema: "aichatlink.event/0.1";
+  eventId: string;
+  seq: number | null;
+  roomId: string;
+  type: AIChatLinkEventType;
+  actor: ActorRef;
+  to: string[];
+  replyToEventId?: string;
+  forwardedEventId?: string;
+  causationId?: string;
+  correlationId: string;
+  rootCorrelationId: string;
+  idempotencyKey?: string;
+  occurredAt: string;
+  durability: "durable" | "transient";
+  body: unknown;
+  provenance?: PublicProvenance;
+};
+
+type ActorRef = {
+  actorId: string;
+  kind: "user" | "agent" | "system";
+  instanceId?: string;
+  displayName: string;
+};
+
+type PublicProvenance = {
+  sourceKind: "web" | "adapter" | "mcp" | "system" | "generated_summary" | "supervision" | "operator";
+  authorActorId?: string;
+  subjectActorId?: string;
+  sourceEventId?: string;
+  labels?: string[];
+};
+```
+
+规则：
+
+- `eventId` 全局唯一；
+- durable event 在数据库提交时获得单调递增 `seq`；
+- transient delta 的 `seq` 为 `null`，不能用于断线重放；
+- `correlationId` 标识一个根交互链；
+- `rootCorrelationId` 固定保存整条 Agent ask/send 链的根 correlation；
+- `causationId` 指向直接导致本事件的事件或 Turn；
+- `replyToEventId` 表示用户可见回复关系；
+- `forwardedEventId` 只引用原事件，不复制可被篡改的作者字段；
+- `to` 表示需要被唤醒的 Agent，不表示私密可见范围；
+- M0-M2 的所有 message 都对房间可见。
+- `provenance` 由 Broker 从已绑定通道和持久记录生成；请求方不能提交或覆盖，且其中不公开 binding/native session/process ID。
+
+### 2.1 durable event
+
+必须持久化：
+
+```text
+message.created
+turn.queued
+turn.dispatched
+turn.started
+turn.completed
+turn.failed
+turn.cancelled
+turn.interrupted
+session.starting
+session.retrying
+session.ready
+session.resumed
+session.stopped
+session.failed
+context.compaction.started
+context.compaction.retrying
+context.compaction.completed
+context.compaction.failed
+memory.remembered
+memory.superseded
+memory.retracted
+identity.remembered
+identity.superseded
+identity.retracted
+routing.loop_stopped
+supervision.paired
+supervision.observed
+supervision.steered
+operator.dispatch
+context.reset
+system.error
+```
+
+`session.*` 表达 native session lineage，而不是进程是否长驻：Structured 在长驻连接上产生；Direct 只有实际解析到 native session ID 或 resume 成功时才产生相应事件。`session.resumed` 只在原生 resume/load 真实成功时产生。Codex 使用 App Server `thread/resume`，ACP driver 使用 `session/load`。Active Kimi ACP 不以 global config preflight 为启动门禁；`session/set_mode(auto)` 必须在 new/load 后、首 prompt 前完成。Hermes 必须以 `--yolo acp` 启动，并在 new/load 后、首 prompt 前完成 `session/set_mode(dont_ask)`。协议中不存在 `approval.*` 事件。`supervision.*` 是房间协作投影，不是记忆层，也不是审批记录。
+
+`session.retrying` 与 `context.compaction.*` 是 transient 运行进度，重连后不回放。body 只包含 operation/Agent、attempt/maxAttempts、下一次退避时间、覆盖序号及稳定错误码等有界投影，不包含 prompt、摘要正文、raw stderr 或 CLI 配置。
+
+每个派发 attempt 持久化以下可靠性投影：
+
+```ts
+type TurnAttemptDelivery = {
+  attemptId: string;
+  turnId: string;
+  transport: "direct" | "structured";
+  dispatchPhase: "prepared" | "prompt_invoked" | "native_started" | "terminal";
+  deliveryCertainty: "not_delivered" | "delivered" | "unknown";
+  nativeTurnId?: string;
+};
+```
+
+`transport` 是从不可变 Turn snapshot 投影的只读值；最小 v4 不在 `turn_attempts` 重复存列，claim 用 `expectedTurnId + expectedTransport` 校验 Turn、binding、instance 三者一致。
+
+调用原生 prompt 前，Broker 必须先持久化 `prompt_invoked + unknown`。只有 transport snapshot 等于当前启动选择且仍为 `prepared + not_delivered` 才可自动重新排队；snapshot 不同以 `TRANSPORT_MODE_MISMATCH` 失败。`delivered` 或 `unknown` 在 reconciliation 失败后进入 terminal `interrupted`，绝不自动创建第二次原生执行或切换 transport。
+
+### 2.2 transient event
+
+默认不持久化：
+
+```text
+turn.content.delta
+turn.reasoning.delta
+turn.progress
+tool.progress
+adapter.heartbeat
+```
+
+`tool.progress.body` 至少携带 `turnId` 与 `nativeType`；原生事件提供稳定 id 时同时携带 `toolCallId`，`details` 只包含 Adapter 已投影的结构字段。Web UI 用 `turnId + toolCallId` 合并同一次工具调用，并将其折叠显示在对应 Agent 气泡内。transient 事件本身不在刷新后重放；terminal transaction 会为已观察到的工具 started/completed 投影按原顺序写入 durable `tool.progress.recorded`，其 body 与 live 投影同形，刷新时继续按相同 key 合并，不能退化成独立全量 JSON 卡片。
+
+`turn.reasoning.delta` 本身仍不落库。若 native Turn 实际产生过推理增量，Broker 在 terminal transaction 中把已观察到的增量按原顺序合并成最多一条 durable `turn.reasoning.recorded`：
+
+```json
+{
+  "turnId": "turn_...",
+  "content": "聚合后的推理文本",
+  "terminalStatus": "completed"
+}
+```
+
+该事件有 durable `seq`，可以随 SQLite cursor 在刷新或重连后回放。`turn.reasoning.recorded` 与 `tool.progress.recorded` 都只服务本地时间线与审计，不属于 message、memory、identity 或 summary；Context Packet、reply chain、房间压缩与自动记忆只能消费明确的 `message.created`、`operator.dispatch` 或记忆数据，不得读取两类记录正文。`operator.dispatch` 是有界派活来源，不是普通聊天气泡。`context.reset` 只记录新的后续上下文下限，不删除 transcript。
+
+`context.reset` 可以带一个可选的**续聊种子**（body: `resumedConversationId` / `resumeFromSeq` / `resumeThroughSeq`）。它表示这个纪元以一段已关闭对话的 seq 区间作为起始上下文：区间不移动、不改写 transcript，只在该纪元之后每个 Context Packet 的 `[resumed_conversation]` 区段逐条重放。没有该字段就是普通 reset。
+
+每个 Turn 恰好有一个 durable terminal event。可选 reasoning record、tool progress records、成功 response message、terminal event、Turn/attempt terminal 更新，以及一条很小的 dated-memory source/checkpoint 登记在同一事务提交；durable 事件顺序固定为 reasoning → tool progress → response（仅成功）→ terminal。checkpoint 只引用当前消息与最终回复，不产生 MemoryRecord/event，也不读取 reasoning/tool。后台 rollup 成功后才另行提交 `memory.remembered|superseded`。若崩溃发生在 final commit 前，可保存已合并的 partial text 并将 Turn 标记为 `interrupted`，但不能把 partial text 伪装成 completed message。
+
+## 3. 发送者身份合同
+
+### 3.1 四级身份
+
+```text
+actorId          稳定群内身份：agent:codex
+instanceId       运行实例：codex/main@<id>
+nativeSessionId  CLI 实际返回的 thread/session 标识；Direct 也可持久化用于后续新进程 resume
+bindingId        本次 Direct invocation 或 Structured session 来源绑定
+```
+
+`actorId` 和 `instanceId` 可进入公开 Envelope。`nativeSessionId` 与 `bindingId` 是 Broker 内部关联字段，默认不进入公共事件。
+
+预置用户身份：
+
+```text
+user:web         local-rest 客户端
+user:assistant   local-operator 客户端；kind 仍是 user，不进 agents 名册
+```
+
+`user:assistant` 不是 `agent:assistant`，也不是 `system:aichatlink`。它不占 hop，不吃 Context Packet，不被 `@all` 唤醒。私有脑进程可以使用内部 adapter id `__assistant__`，但该 id 禁止出现在名册、bootstrap 或目标芯片。
+
+### 3.2 非权威字段
+
+以下信息都不能决定发送者：
+
+- 正文中的“我是 Grok”；
+- 正文中的 `@kimi`；
+- Agent 返回的任意 `from` JSON；
+- MCP 工具参数中的自报名称；
+- forwarded message 中复制出来的作者文本。
+
+Web API 和 MCP 工具都不接受调用方指定 `from`、`actor` 或 `provenance`。出现任一字段固定返回 `SENDER_FIELD_FORBIDDEN`，绝不能忽略后继续采用请求的一部分 sender 信息。
+
+### 3.3 通道绑定
+
+- Direct 一次性 invocation 或 App Server/ACP session 在原生派发前绑定一个 `bindingId`；Direct binding 可引用从前一 Turn 取得的 native session ID，但仍是新的进程/binding lineage；
+- 只为 Structured 且 capability 已验证可挂载 MCP 的会话建立独立 MCP binding，三个 CLI 不共用匿名入口；
+- `aichatlink.send/ask/remember` 根据 MCP binding 得到 actor；
+- Adapter 重启产生新 `instanceId/bindingId`，但可继续使用同一稳定 `actorId`。Structured 业务 Turn 持久收敛为 `failed + PROTOCOL_INVALID_MESSAGE` 后，Broker 可自动重建该 Adapter 的进程/session；原失败 Turn 保持 terminal，不进入新 binding，也不自动重放。
+
+### 3.4 来源关联边界
+
+AIChatLink 在正常 Adapter invocation/会话流程中从 binding registry 取得 actor，正文和工具 schema 都没有设置 sender 的入口。binding 只是 provenance/correlation handle，不是 secret、认证或能力令牌；本机进程仿造 binding、修改数据库或调用 loopback API 不属于 AIChatLink 的防御范围。
+
+## 4. 可见性与路由
+
+AIChatLink 将两个概念分开：
+
+- `visibility`：M0-M2 全部消息进入公共房间 transcript，并在 Web UI 可见；
+- `to`：哪些 Agent 因该消息获得一个新 Turn。
+
+未被寻址的 Agent 不会立即启动 Turn。它在下次被唤醒时可通过增量 Context Packet 看到未读公共消息，也可在当前 Structured 原生回合显式调用 `aichatlink.read`。
+
+路由来源只有：
+
+1. Web composer 的结构化 recipients（`@all` 或勾选的 `agent:*`）；页面不再提供监督开关或观察者芯片；
+2. Structured CLI 在已绑定的原生会话中显式调用 `aichatlink.send` 或 `aichatlink.ask`；可选 `supervision.observers` 另建 Watch Turn。请求方不能自报「我是监督者」；`sourceKind: "supervision"` 由 Broker 写入。调用方不能把自己放进 observers。
+3. `local-operator` 的控场或派活：用户单独对助理说的话不经 Broker composer，也不先落房间 `message.created`。助理用 operator tool 取消/压缩/重启/记忆/setup 时不造群气泡；默认派活写 durable `operator.dispatch` 并创建目标 Turn。只有明确要让群看见时才 `send`，作者固定为 `user:assistant`。`POST /api/messages` 仍接受显式 `to` / `supervision`，供测试与非 UI 客户端使用。
+
+普通 CLI 回复和自然语言 `@name` 不触发新 Turn。把 worker 与 observer 同时放进同一条 `to[]` 只是并行执行同一任务，不是观察。侧边对话里的自然语言 `@助理` 也不派发。
+
+### 4.1 `@all`
+
+- 用户 `@all`：唤醒所有已启用 Agent；
+- Agent `@all`：仅 Structured AIChatLink MCP 的工具参数可触发，默认不唤醒自己；
+- 每个目标生成独立 Turn；
+- 多目标并行进入不同 Agent lane；
+- 任何一个目标失败不取消其他目标。
+
+### 4.2 reply 与 forward
+
+- reply 使用 `replyToEventId`，不会自动改变 recipients；
+- forward 使用对原消息的引用，不允许调用方填写可修改的 `forwardedFrom`；
+- UI 从原消息 Envelope 读取原作者；
+- 转发者仍然是当前 actor。
+
+### 4.3 同步监督配对
+
+监督是房间协作模式，不是治理、审批或第二套权限。房间 Agent 在 `send`/`ask` 上带 `supervision.observers`，或 operator 派活带同一字段后，一条命令在同一 `rootCorrelationId` 下创建一对并行 Turn：
+
+- **Worker Turn**：普通 Context Packet，执行用户任务；native CLI 仍是固定 `unrestricted`；
+- **Supervisor Watch Turn**：专用观察包 + `aichatlink.watch` / `aichatlink.steer`，不复用用户正文当执行提示。
+
+角色只存在于本次命令的配对行，不写进 Agent 名册枚举。同一个 Agent 可以在不同命令里当 worker 或 observer，但不能在同一命令里身兼两职。
+
+```ts
+type SupervisionPair = {
+  observers: AgentActorId[]; // 1..4，必须已启用且不等于本次 worker
+  mode: "live_steer";        // v1 只这一个值
+};
+```
+
+成员 MCP 的 `send`/`ask`、`POST /api/messages` 与 `local-operator` 的 `send` / `worker_dispatch` / `worker_ask` / `dispatch_event` 都可带同一 `supervision` 字段。Web composer 仍选择 worker，但不再选择 observer。Observer 由 Broker 另建 `commandType` 可区分的 Watch Turn；公开 `actor` 仍是任务作者（`user:web`、`agent:*` 或 `user:assistant`）或 observer binding（watch/steer 产出）。无群气泡时，pair 的任务引用是 `operator.dispatch` event id。继续工作只来自：本次 steer 改道、supervisor 之后显式 `send`/`ask`、或用户再发。Broker 不在 steer 之后自动再开「监督循环第 N 轮」。助理自己不当 observer，也没有 `watch`/`steer`。调用 Agent 也不能把自己放进 observers。
+
+## 5. Turn 状态机
+
+```text
+queued
+  -> dispatching
+  -> running
+  -> completed | failed | cancelled | interrupted
+
+queued -> cancelled
+dispatching | running -> cancelling -> completed | cancelled | failed | interrupted
+```
+
+`accepted` 是 REST/MCP 命令的接收结果，不是 Turn 状态。它只代表 Broker 已持久化消息和 queued Turn，不代表目标 CLI 已完成。`streaming` 是 running 期间的可选事件活动，不是持久状态；没有 delta 的 Adapter 也可以从 running 直接进入 terminal。
+
+Terminal 状态不可回到 running。若用户显式重试，创建新的 Turn，并用 `causationId` 指向旧 Turn。
+
+`PROTOCOL_INVALID_MESSAGE` 表示 AIChatLink 无法继续信任当前 Structured 进程/session 的 wire 状态。当前 Turn 必须先以一次 durable `failed` 收敛；随后允许自动替换 Adapter instance/binding，并优先 resume/load 同一 native session 以服务**后续** Turn。这个恢复动作不是 Turn retry，不创建第二个 native turn，也不改变原 Turn 的 terminal 状态。
+
+状态恢复必须结合 attempt 的 `dispatchPhase` 与 `deliveryCertainty`。`dispatching/running` 不是自动重试许可：只有状态不是 `cancelling` 且确认 `not_delivered` 才能重排；`cancelling + not_delivered` 收敛为 `cancelled`。已派发的 `cancelling` 保留取消意图并尝试对同一 native Turn 重发 cancel；若 native completion 已抢先成功，允许收敛为 `completed`。`delivered` 或 `unknown` 无法关联回同一 native Turn 时进入 `interrupted`，由用户显式继续或重试；已有 `delivered` 证据不能倒退成 `unknown`。
+
+## 6. Agent 互发工具（仅 Structured）
+
+AIChatLink 必须实现 `send/publish/ask/collect/read`，并向 Structured Agent 提供绑定到自身的 `core_memory_remember`。某个 Adapter 只有在现场 probe 已验证 MCP 注入、发现和实际调用后，才向该 session 暴露工具；普通 attach/call 失败只能分级为 `unsupported` 或 `not_observed`。只有 Agent 已通过独立外部策略 evidence 投影为 `native_policy_blocked` 时，MCP 不可用原因才可引用该状态。三种情况都返回 `MCP_UNAVAILABLE`；不能启用 deprecated Direct 作为替代。Web/REST 也可创建相同路由命令，公共 transcript、公共记忆和身份记忆不依赖 MCP。
+
+### 6.1 `aichatlink.send`
+
+异步派发，立即返回持久化结果：
+
+```ts
+type SendInput = {
+  to: string[];
+  content: string;
+  replyToEventId?: string;
+  clientCommandId: string;
+};
+
+type SendResult = {
+  messageEventId: string;
+  correlationId: string;
+  turns: Array<{
+    target: string;
+    turnId: string;
+    status: "queued";
+    queuePosition?: number;
+    activeTurnId?: string;
+  }>;
+};
+```
+
+适合异步委托和确实需要目标另开一次行动的消息。send **总会**创建目标 Turn；若同一 correlation 中目标已有 running Turn，新 Turn 会排在其后，哪怕当前 running Turn 已能通过 `read` 看到这条公开消息。因此进行中的同根讨论应先 `read` 检查状态，并用 `publish/read` 交换质疑、回应和 checkpoint；只有确实需要当前 Turn 结束后的独立行动才 send。`queuePosition` 是该目标前方尚未 terminal 的 Turn 数；`activeTurnId` 在目标正运行/取消时给出。`replyToEventId` 省略时，Broker 使用调用方当前 Turn 的 `sourceEventId`，让普通交接自动形成 reply chain。
+
+### 6.2 `aichatlink.publish`
+
+写入公开、durable 的进度、质疑、回应或阶段结论，但不创建目标 Turn、不唤醒任何 Agent：
+
+```ts
+type PublishInput = {
+  content: string;
+  replyToEventId?: string;
+  clientCommandId: string;
+};
+
+type PublishResult = {
+  messageEventId: string;
+  correlationId: string;
+};
+```
+
+`replyToEventId` 同样默认取当前 source event。publish 仍经 Broker 和 `client_commands` 幂等提交；它不是自然语言路由，也不是 `send(to=[])` 的隐式模式。对已经在同一 correlation 中运行的参与者，publish 是进行中讨论的公开投递面；参与者用 `read` 在自己的当前 Turn 内补读并回应，从而不把已经吸收的观点再排成延迟 Turn。
+
+### 6.3 `aichatlink.ask`
+
+发起目标 Turn，并等待目标的 terminal response 作为当前 MCP 工具结果返回；同时，问题与回复仍进入公共群聊。
+
+```ts
+type AskInput = {
+  to: string[];
+  content: string;
+  replyToEventId?: string;
+  clientCommandId: string;
+  timeoutMs?: number;
+  cancelOnTimeout?: boolean;
+};
+
+type AskResult = {
+  messageEventId: string;
+  correlationId: string;
+  state: "terminal" | "pending";
+  results: Array<{
+    target: string;
+    turnId: string;
+    status: "completed" | "failed" | "cancelled" | "pending";
+    queuePosition: number;
+    activeTurnId?: string;
+    responseEventId?: string;
+    content?: string;
+    errorCode?: string;
+    note?: string;
+  }>;
+};
+```
+
+多目标 ask 并行等待，逐目标返回状态。一个目标失败不能丢弃其他目标已完成的结果。
+
+若任一新 child Turn 前方已有未完成工作，ask 不占用当前模型回合空等，立即返回 `state=pending`。ask 与 send 一样仍已创建独立后续 Turn；对同一 correlation 中已经运行的参与者，进行中的问答应使用 `publish/read`，除非调用方有意要求其当前 Turn 结束后再行动一次。否则最多等待 `min(timeouts.askMs, 60,000)`；调用方显式 `timeoutMs` 的上限也是 60,000 ms。等待结束但 child 尚未 terminal 时同样返回 pending，而不是把 Turn 伪造为 timeout terminal。
+
+默认 `cancelOnTimeout=false`：bounded wait 结束只停止当前工具等待，目标 Turn 继续。若显式为 true，Broker 对仍运行的 ask child Turn 发起 best-effort 原生 cancel；结果在 durable terminal 前仍可为 pending。取消发起 ask 的父 Turn 时，Broker 默认也 best-effort 取消尚未 terminal 的同步 ask child；异步 `send` 创建的 Turn 不随父 Turn 取消。
+
+pending 结果的有界 `note` 说明：继续同一个请求时使用同一 `messageEventId` 调用 collect，避免重复派发；实质不同的追问仍可新建 send/ask。`note` 只解释工具效果，不指定讨论角色、拓扑或轮数，也不增加回送、审批或自动派发。
+
+### 6.4 `aichatlink.collect`
+
+按一条既有 ask 的 source message 精确收集它创建的 child Turns：
+
+```ts
+type CollectInput = {
+  messageEventId: string;
+  timeoutMs?: number; // max 60,000
+};
+
+type CollectResult = AskResult;
+```
+
+Broker 校验该 message 属于当前 room/root correlation，并通过既有 `turns.source_event_id` 查询准确集合。collect 不写命令、不创建 Turn、不重放 prompt；目标仍排队时返回最新 queue metadata，lane 可运行时才做有界等待。
+
+AIChatLink 不为评审或其他协作指定协调者、互评拓扑、最终记录者或讨论轮数。Agent 可以经 Broker 自行 send/ask、公开质疑、交叉修正、委托或形成临时协调方式；用户指定的最终记录者只是一项任务要求，不自动成为调度者。MCP instructions、工具描述和 Context Packet 只说明工具的唤醒、等待、续收、回复链与上下文冻结语义，不把某一种工作流伪装成协议要求。
+
+### 6.5 `aichatlink.read`
+
+查询异步消息、Turn 或 correlation 状态：
+
+```ts
+type ReadInput = {
+  correlationId?: string;
+  afterSeq?: number;
+  limit?: number;
+};
+```
+
+### 6.6 同步 ask 因果循环
+
+典型死锁：A 正在同步 `ask(B)`，B 又同步 `ask(A)`。
+
+Store 对每个 MCP child Turn 都严格验证 `parentTurnId`存在、`rootCorrelationId` 与父链一致、`hopCount = parent.hopCount + 1`，并从持久父链重建 ancestor actor chain。只有 `commandType="mcp.ask"` 且该命令显式进入 `waitsForChildren` 集合时，目标出现在 ancestor actor chain 才拒绝该同步 ask：
+
+```text
+errorCode = CAUSAL_CYCLE
+```
+
+B 仍可使用异步 `aichatlink.send(A)`；它可以回发祖先 actor，该消息进入公共房间并排队，但不阻塞 B 当前工具调用。异步 send 仍必须通过 parent/root/hop 完整性、root-turn、actor-call、hop 和 queue 限额；不得对它误报 `CAUSAL_CYCLE`。
+
+### 6.7 `aichatlink.watch` / `aichatlink.steer`（仅 Watch Turn）
+
+现有 `send`/`ask`/`read` 不够：`ask(worker)` 只会在 worker 当前 lane FIFO 之后再排一条 Turn，打断不了正在跑的 Turn。只给本次 `supervision.watch` 的调用方成功执行：
+
+```ts
+type WatchInput = {
+  subjectTurnId?: string; // 省略=配对中当前被观察的 worker
+  afterSeq?: number;
+  until: "next_milestone" | "terminal";
+  timeoutMs?: number;
+};
+
+type SteerInput = {
+  subjectTurnId?: string;
+  action: "nudge" | "interrupt";
+  reason: string;          // 必须公开
+  content: string;         // 指导正文，进入公共 transcript
+  clientCommandId: string;
+};
+```
+
+合同：
+
+- **同步观察**：supervisor 与 worker 同时 `running`；`watch` 阻塞等待有界里程碑（turn started、工具名+status、内容抽稀、terminal），不是逐 token 转发。
+- **打断**：`steer(interrupt)` = 现有 native cancel/interrupt 作用在被观察 Turn 整段上，再排队一条新的 Worker Turn。不能取消「Turn 内部的某一次工具调用」而不取消整段 Turn。
+- **指导**：打断后的新 Turn 以 supervisor 的公开指导为 `current_message`，`causationId` 指向 steer 事件。不把指导伪装成用户发言；`from` 仍由 binding 决定。
+- **不是审批**：steer 不出现 allow/deny 按钮，不产生 `approval.*`，不改变 unrestricted，不代答 native `requestUserInput`。
+- 普通业务 Turn 调用 `watch`/`steer` 返回 `SUPERVISION_WATCH_REQUIRED`。
+- Watch Turn 默认可继续 `read`；对正在被观察的 worker 再 `ask`/`send` 返回 `SUPERVISION_STEER_REQUIRED`。
+- 同一被观察 Turn 的 steer 次数受 `limits.steersPerSubjectTurn`（默认 3）限制；超出返回 `STEER_LIMIT_REACHED`，不静默丢弃。
+- 用户 Web 取消 worker 时，watch 以 `subject_cancelled` 结束，不自动改道。
+
+快照**可以**带：被观察 `turnId`、status、`deliveryCertainty`、用户任务原文引用（event id + 有界摘要）、已持久化的 worker 公开 `message.created` 增量（截断）、工具**名字 + status + 稳定 toolCallId**、已发生的 steer 次数与最近 reason。
+
+快照**不可以**带：`turn.reasoning.recorded` 正文、完整 tool arguments/result、stderr、native payload；也不得把快照写进 Context Packet 的 memory / dated-memory / 房间压缩输入。
+
+## 7. 循环、资源与背压
+
+自然语言正文不触发路由。Structured AIChatLink MCP 显式工具可能形成长链，因此 Envelope/Turn 保留以下可靠性字段：
+
+```text
+rootCorrelationId
+parentTurnId
+hopCount
+actorCallCountWithinRoot
+```
+
+Broker 必须支持可配置的：
+
+- 每个根交互的最大 Agent Turn 数；
+- 最大 hop count；
+- 每个 Agent 在同一因果链的调用次数；
+- 每 Agent 队列长度；
+- message 字节数和 attachment 引用数；
+- ask timeout、watch timeout 和 Turn idle timeout；
+- 同一被观察 Turn 的 steer 次数。
+
+达到限制时创建可见的 `routing.loop_stopped`、`STEER_LIMIT_REACHED` 或 `turn.failed`，绝不静默丢弃。上述是资源可靠性约束，不判断 Agent 是否有权执行 CLI 工具，也不表示 supervisor 有权改文件。
+
+## 8. 幂等与顺序
+
+### 8.1 命令幂等
+
+幂等键由：
+
+```text
+sourceBinding + clientCommandId
+```
+
+唯一约束保证同一调用方重试不会创建第二条消息或第二组 Turn。相同键、不同 canonical payload 返回 `CLIENT_COMMAND_CONFLICT`。
+
+### 8.2 派发幂等
+
+每个目标 Turn 唯一键：
+
+```text
+sourceMessageEventId + targetActorId
+```
+
+重复命令不能重新唤醒目标。
+
+### 8.3 顺序
+
+- durable `seq` 是数据库提交顺序；
+- 同一 Agent lane 按 Turn enqueue seq FIFO；
+- 不同 Agent 的完成顺序不固定；
+- transient delta 只在同一 native Turn 的 `chunkIndex` 内有序；
+- UI 不应按到达时间重新排序已经有 durable seq 的事件。
+
+## 9. Native interaction 失败合同
+
+v0.1 固定 unrestricted，AIChatLink 没有 approval、permission 或 user-input 状态机。Adapter 若收到 approval、permission、`requestUserInput`、question 或 elicitation request：
+
+- 不创建群组事件、pending 记录或 REST 资源；
+- 不把 request/options 发送给 UI，不替用户选择 allow/deny；
+- 协议必须结清请求才能退出时，只回复 cancellation/error 并发起 native cancel；Kimi ACP 对 `session/request_permission` 回复 `cancelled` 后发送 `session/cancel`；
+- native request 证明 prompt 已越过可能交付边界，attempt 推进为 `delivered + terminal`；当前 Turn 恰好产生一次 durable `turn.failed`，并且错误码一律为 `UNEXPECTED_NATIVE_INTERACTION`；
+- 不自动 fallback 或重放。
+
+失败事件只保存 request kind、adapter、turn correlation 和有界 native reason code；不保存可选决定、完整命令或未建模 payload。
+
+`NATIVE_POLICY_BLOCKED` 是独立的 Adapter 启动/session 失败合同：必须由外部策略 preflight 或 native 启动/session 拒绝明确证明 enterprise requirement、server policy 或 static deny，才把 Agent health 投影为 `native_policy_blocked`。不得从 interaction request、options 或普通 MCP attach/call 失败推断。
+
+## 10. REST 合同
+
+### 10.1 Bootstrap
+
+`GET /api/bootstrap` 在同一 SQLite read snapshot 中返回房间投影和该投影已包含的最大 durable `cursor`。查询只读取有界的最近事件以及当前房间的非终态 Turn，不扫描完整历史；公开 Turn 仅含 `turnId/targetActorId/status/sourceEventId`，不回显 binding、adapter、native ID 或调度字段。客户端随后以该 cursor 打开 `/api/events`；在 bootstrap commit snapshot 与 SSE 连接之间提交的事件会由同一 SQLite tail 以 `seq > cursor` 读取，不依赖一次性 live 广播。
+
+### 10.2 创建用户消息
+
+```http
+POST /api/messages
+Content-Type: application/json
+
+{
+  "clientCommandId": "web-uuid",
+  "to": ["agent:codex"],
+  "content": "请分别评审这个方案",
+  "replyToEventId": null,
+  "supervision": {
+    "observers": ["agent:grok"],
+    "mode": "live_steer"
+  }
+}
+```
+
+`supervision` 可选。有配对时返回额外的 `watchTurns` / `watchEventId` / `pairEventId`；`turns` 仍只含 workers。observer 不得与本次 `to` 重叠。请求不得携带 `from`、`actor`、`provenance`、`transport` 或 `access`。
+
+返回 `202 Accepted`：
+
+```json
+{
+  "messageEventId": "evt_...",
+  "correlationId": "corr_...",
+  "turns": [
+    { "target": "agent:codex", "turnId": "turn_...", "status": "queued", "transport": "structured" }
+  ],
+  "watchTurns": [
+    { "target": "agent:grok", "turnId": "turn_...", "status": "queued", "transport": "structured" }
+  ],
+  "watchEventId": "evt_...",
+  "pairEventId": "evt_..."
+}
+```
+
+### 10.3 取消
+
+`POST /api/turns/:turnId/cancel` 表达取消意图。Structured Adapter 调用 App Server/ACP 原生 cancel 或 interrupt，只作用于所属进程树。响应成功不等于 native CLI 已完成取消；最终结果由 SSE terminal event 确认。历史 Direct Turn 只返回其已持久终态，不启动旧 Adapter。
+
+响应中的 `transport` 是 Broker 启动选择的只读快照。请求不得携带 `transport` 或 `access`；存在这些字段时返回 `INVALID_ENVELOPE`，不能按 Turn 改模式。
+
+### 10.4 记忆与身份
+
+公共记忆与身份记忆是 Broker REST 基础能力，不依赖 MCP：
+
+```text
+GET  /api/memory
+POST /api/memory
+POST /api/memory/:memoryId/supersede
+POST /api/memory/:memoryId/retract
+
+GET  /api/identity
+POST /api/identity
+POST /api/identity/:identityId/supersede
+POST /api/identity/:identityId/retract
+```
+
+Web identity 写入请求包含 `clientCommandId`、`subjectActorId`、`kind`、`content` 和可选 `sourceEventId`；author 固定为 `user:web`。supersede 追加新版本并引用旧 identity ID，retract 写 tombstone。任何请求都不能指定 author/from。
+
+Web UI 不再暴露 identity 写入面板；稳定 Agent 身份由 `/setup` 写入对应 Agent 配置。`/api/identity` 与 MCP identity 工具仅作为兼容接口保留。`/api/memory` 同时承载 room scope 的公共记忆与 agent scope 的两层记忆；`agentMemoryType=core|dated` 只允许出现在 Agent scope。Agent 设置把 core 独立展示并允许维护，把 dated 按 `createdAt` 日期分组展示。成功 Turn 只登记 rollup source；达到批次、日期或压缩边界后由所属 Agent 生成 dated，其他 Turn 状态不登记。
+
+### 10.5 单房间上下文用量与显式压缩
+
+`GET /api/context` 返回当前 `room:main` 的 active checkpoint、其后 `message.created` / `operator.dispatch` 与协议格式开销的字符估算：`estimatedCharacters/maxCharacters/compactionTriggerCharacters/utilizationPercent`。它不是任一模型的 token 计数，也不把目标 Agent 身份、记忆或原生 instructions 伪装成统一窗口。
+
+`POST /api/context/compact` 接受严格的 `{ "clientCommandId": "..." }`。命令经 Web binding 和 Broker receipt 单飞，调用与自动压缩相同的 Room Context Engine、摘要校验与 CAS；默认保留最近 12 条房间上下文消息原文（`message.created` 与 `operator.dispatch`）。`turn.reasoning.recorded`、`tool.progress.recorded` 与其他审计事件仍不进入压缩输入。响应只返回 `compacted` 与更新后的 usage 投影，不返回摘要正文。完整 transcript 不删除，失败也不替换 active summary。`context.reset` 与 compact 一样按 `clientCommandId` 单飞。reset 把后续 usage / compact / Context Packet 的下限推到当前 high-water，并 supersede 未越过该下限的检查点；Broker 写入的 `context.reset` 审计事件不是房间上下文消息，因此在没有新的 `message.created` / `operator.dispatch` 时再次 reset 返回 `reset: false`。
+
+### 10.6 本机 Agent 引导与配置
+
+`GET /api/setup` 返回 config 路径、是否已有配置、runtime 是否正在运行、五种 native driver 的默认命令检测结果，以及可编辑的 `serverPort/workspace/storagePath/agents[]` 草稿、可选的顶层 `assistant` 卡和只读的 `workspaceResolved`。`POST /api/setup` 严格接收同一草稿并要求稳定 Agent ID 唯一、至少一个 Agent 启用；每个 Agent 只包含 `id/driver/name/identity/command/cwd/enabled`。`assistant` 不是名册成员；保留 id `assistant` 与 `__assistant__` 不能当作 roster Agent。首次引导默认勾选助理；已有 `aichatlink.json` 缺省该项时保持未启用。
+
+`workspace` 是房间级工作目录；Agent 与 `assistant.brain` 的 `cwd` 都可省略表示继承它（两者都缺省时落到配置文件所在目录）。保存只写回简写形式，不把继承结果展开成每个 Agent 的显式 `cwd`；`workspace` 非空时必须指向一个已存在的目录，否则 `POST /api/setup` 返回 400 且不写文件。工作目录变更属于配置改动，运行中保存仍返回 `restartRequired=true`；由于 native 会话记录自己的 cwd，改动后重启会让相应 Agent 以新 native session 启动。
+
+`GET /api/setup/workspace?path=<绝对路径>` 返回该目录的子目录清单（仅目录、跳过点目录与 `node_modules` 等噪音、按名称排序、标注是否含 `.git`、超出 4096 项时截断并置 `truncated`）、`parent`（到达根时为 `null`）与 home/Desktop/盘根快捷入口；路径缺失、不可读或 5s 内未返回时返回 400。`POST /api/setup/workspace/reveal` 接收 `{"path": "..."}` 并交给平台文件管理器打开，必须带 `x-aichatlink-setup: 1` 请求头，否则返回 400。两个接口都只在本机回环绑定上提供，且不读取文件内容。
+
+setup contract 不包含 `transport`、`access`、approval、sandbox、model 或任意 native flags。standalone `aichatlink init` 成功保存后启动正式 runtime，并让引导页轮询同源 `GET /api/setup/launch`；只有该接口返回 loopback 正式 origin 的 `ready` 状态后，页面才自动跳转到群聊，随后关闭临时服务。运行中的 `/setup` 可以更新配置文件，但响应必须标记 `restartRequired=true`，不能自动跳转或在旧 runtime 中热换 binding/session。
+
+`GET /api/health` 的正式 runtime 响应必须包含 `service="aichatlink"`、`protocol="aichatlink.runtime/1"`、64 位十六进制 `runtimeKey` 和 `runtimeScopeKey`。前者是 canonical config + canonical config path 的 SHA-256；后者只由 canonical config path 生成，因此 Agent 名册等配置内容保存后仍保持稳定。两者都只用于本机实例相关性，不是 credential、安全边界或远程发现标识。`aichatlink start` 仅在 service/protocol/runtimeKey 全部匹配时把已运行实例视为成功；其他 listener 必须 fail-closed 并提示端口冲突。CLI 的预检不能替代 `listen` 的原子租约，`EADDRINUSE` 后必须再做有界探测以处理并发启动竞态。
+
+### 10.7 房间助理侧边对话
+
+用户单独对助理说话走独立 REST，不经 `POST /api/messages`，不创建房间 `message.created` 或 Agent Turn：
+
+```text
+GET  /api/assistant
+GET  /api/assistant/messages
+POST /api/assistant/messages
+POST /api/assistant/cancel
+```
+
+`POST /api/assistant/messages` 只接受 `{ clientCommandId, content }`。请求不得携带 `from`、`actor`、`provenance`、`to` 或 `supervision`。同一 `clientCommandId` 会加入进行中的助理回合，或重放已写下的回复；用户行已在、回复未写时会再跑一轮脑，不追加第二条用户行。`GET /api/assistant/messages` 返回最近最多 200 条侧边对话。助理 harness 每次注入产品默认提示词，用户 `extraInstructions` 只能追加。助理若要动房间，必须再走 `/mcp/operator`；控场不落群气泡，派活默认写 `operator.dispatch`。
+
+### 10.8 本机 runtime 停止与重载
+
+`aichatlink stop` 与 `aichatlink restart` 使用同一个窄的 loopback 生命周期端点，不把进程停止/重载伪装成 Broker message 或 durable command：
+
+```http
+POST /api/runtime/shutdown
+Content-Type: application/json
+
+{ "runtimeScopeKey": "<64-hex>" }
+```
+
+只有正式 product runtime 暴露该端点。请求必须严格匹配当前 health 返回的 `runtimeScopeKey`；不匹配返回 conflict，不停止进程。成功先返回：
+
+```json
+{
+  "accepted": true,
+  "runtimeKey": "<64-hex>",
+  "runtimeScopeKey": "<64-hex>"
+}
+```
+
+HTTP 状态为 `202 Accepted`。响应完成后 runtime 进入 draining：关闭 SSE、拒绝新的产品请求并有界等待已开始的 REST 工作，但 listener 仍保持绑定；随后按既有关闭合同收敛房间助理、MCP、Broker、Agent session、publisher/SSE 与 Store，最后才关闭 HTTP listener。draining 期间 `GET /api/health` 返回 HTTP 503、`status="closing"` 和完整 runtime identity，使 CLI 不把关闭中的 listener 误认成外部占用。
+
+CLI 只有在当前配置的 origin 可达，且旧 runtime 的 `runtimeKey` 完全相同或 `runtimeScopeKey` 与当前 canonical config path 相同时才调用该端点。它连续确认端口不可达后，`stop` 直接完成且不启动任何 runtime；`restart` 才按最新配置执行普通 start 竞态流程。关闭超时、listener 被替换、旧版 runtime 无端点或配置路径不同都 fail-closed。若实例未运行，`stop` 报告未检测到实例，启动时应使用 `aichatlink start`；若 `server.port` 也已变化，必须先停止旧端口实例。shutdown request 不写 `client_commands`、event 或新的持久状态，重复请求依赖 runtime `close()` 的进程内幂等。
+
+### 10.9 对话列表与旧对话续聊
+
+```http
+GET  /api/conversations
+POST /api/conversations/resume
+```
+
+`GET /api/conversations` 把 `context_resets` 的 `through_seq` 边界投影成对话列表：`conversationId=conv:<startSeq>`、标题取该纪元第一条用户消息（无消息时 `对话 N`）、`startSeq/endSeq/startedAt`，最后一个纪元 `active=true`。**没有任何房间消息（`message.created` / `operator.dispatch`）的已关闭纪元不进入列表**——连续 reset 或 reset 后立刻续聊会在边界上留下只含 `context.reset` 事件的一格，它没有内容可回放，不伪装成 `对话 N`；活动纪元始终列出，用于「新对话已开始」的空态。若该纪元的边界带续聊种子，则额外返回 `resumedFrom`：`{ conversationId, title, fromSeq, throughSeq }`，标题在无自有消息时写成 `<源对话> · 续`。该接口只读，不新增表，不改事件模型。
+
+`POST /api/conversations/resume` 接受严格 `{ clientCommandId, conversationId, resetNativeSessions? }`。它把一段**已关闭**的对话重新打开为**新纪元**：在当前 high-water 处写一条带续聊种子的 `context.reset`，因此后续 Context Packet 的 `[resumed_conversation]` 区段会逐条重放该对话区间。
+
+- 种子起点取源对话的 `resumedFrom.fromSeq`（没有则取它自己的 `startSeq`），终点取它的 `endSeq`；因此连续续聊不会丢掉最初那段对话。
+- 只接受已关闭对话：`active=true` 的对话返回 `INVALID_ENVELOPE`（继续在它里面说话即可），未知 id 返回 `UNKNOWN_TARGET`。
+- `resetNativeSessions` 默认 `true`（与 `/api/context/reset` 相反），因为续聊的目的就是给新纪元一个干净的 native session，而不是把旧 native 上下文和种子叠加两次。
+- 同一 `clientCommandId` 单飞并重放同一结果；种子不改写、不移动、不删除任何既有事件或 `seq`。
+- 响应与 `/api/context/reset` 同形（`RoomContextResetResult`），usage 里额外带 `resumedMessageCount`，表示种子贡献的消息条数。
+
+
+### 10.10 工作目录 hub 与 `?ws` 路由
+
+```http
+GET    /api/workspaces
+POST   /api/workspaces                    # x-aichatlink-setup: 1
+DELETE /api/workspaces/:workspaceId       # x-aichatlink-setup: 1
+POST   /api/workspaces/:workspaceId/restart  # x-aichatlink-setup: 1
+```
+
+`GET /api/workspaces` 返回 `{ workspaces: WorkspaceSummary[] }`，最多 8 项：主目录（`kind:"primary"`）在前，其余按注册顺序。每项包含：
+
+```ts
+type WorkspaceSummary = {
+  workspaceId: string;        // "ws_" + sha256(realpath casefold).slice(0,12)
+  label: string;
+  path: string;               // real absolute path
+  kind: "primary" | "added";
+  status: "starting" | "ready" | "failed" | "stopped";
+  agentCount: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+```
+
+`POST /api/workspaces` 接受 `{ path, label? }`，返回 `{ workspace, created }`。路径必须是已存在的目录；同一 realpath 再次提交会复用原 `workspaceId` 与原数据库（`created:false`），不会启动第二个 runtime。写请求缺少 `x-aichatlink-setup: 1` 返回 400。目录不存在、不是目录、或超过上限返回 400 `INVALID_ENVELOPE`。创建成功先返回 `starting`，子 runtime 在后台启动；`GET /api/workspaces` 轮询到 `ready|failed`。
+
+`DELETE /api/workspaces/:id` 先有界关闭该目录的 runtime，再从注册表删除；数据目录与 SQLite 保留。主目录返回 409 `STORE_CONFLICT`。`POST /api/workspaces/:id/restart` 关闭后重新启动，返回 `starting`。
+
+**`?ws=<workspaceId>`** 是 hub 的路由参数，不是房间事件字段：
+
+| 请求 | hub 行为 |
+| --- | --- |
+| 主目录 id | 剥掉 `ws`，由主 runtime 本地服务 |
+| 已注册且 `ready` 的子目录 | 反向代理到子 runtime 的 loopback origin（含 `/api/events` SSE）；`ws` 在转发前剥掉，`Last-Event-ID` 原样转发 |
+| 已注册但 `starting|failed` | 503 `{ error: { code: "WORKSPACE_NOT_READY", details: { workspaceId, errorCode? } } }` |
+| 未知 id | 404 `WORKSPACE_NOT_FOUND` |
+| `/api/setup`、`/api/setup/*`、`/setup`、`/setup.html`、`/mcp`、`/mcp/operator`、`/api/runtime/shutdown` + `ws` | 404；这些是 hub/主 runtime 独有表面，不允许穿透到子 runtime |
+| `/api/workspaces*` + `ws` | 404；hub 路由不接受二次路由 |
+
+子 runtime 不暴露 setup、MCP 代理或 runtime control；它的 identity 不带 `runtimeScopeKey`。每个子目录使用独立的 SQLite（`<primaryStoreDir>/workspaces/<id>/aichatlink.db`）、独立的 MCP URL 与独立的 Agent session；主目录的 `aichatlink.db` 不被共享。关闭 hub 时按「停止接受 → 子 runtime 逆序关闭 → 主 runtime 关闭 → 释放端口」级联，子 runtime 不会成为孤儿。
+
+## 11. SSE 合同
+
+```http
+GET /api/events?afterSeq=123
+Accept: text/event-stream
+Last-Event-ID: 123
+```
+
+durable event：
+
+```text
+id: 124
+data: { ...AIChatLinkEnvelope... }
+```
+
+transient delta：
+
+```text
+data: { "type":"turn.content.delta", "body":{ "turnId":"...", "chunkIndex":4, "text":"..." }, ... }
+```
+
+回合结束后的聚合推理与工具进度分别使用普通 durable event `turn.reasoning.recorded` / `tool.progress.recorded`，带 SSE `id`，不是 delta 通道。
+
+规则：
+
+- 只提供 `afterSeq` 或 `Last-Event-ID` 时，它是该连接的 cursor；两者同时存在必须数值相同，不同时以 `INVALID_ENVELOPE` 拒绝，不猜测优先级；
+- 服务端不得使用有窗口的“查询历史，然后另行订阅 live”两步切换。SQLite-backed SSE 反复读取 `seq > cursor ORDER BY seq`；commit notification 只负责唤醒下一次查询，因此 replay/live cutover 不会漏 durable event；
+- 所有 Envelope 使用默认 SSE `message` 事件，业务类型只读取 Envelope `type`，新增类型无需预注册浏览器 listener；
+- transient delta 不使用 durable SSE id；
+- `turn.reasoning.recorded` 使用 durable seq/id 并可回放，但 Web 不把它注册为普通消息或发送目标；
+- `tool.progress.recorded` 使用 durable seq/id 并复用折叠工具 UI，但不注册为普通消息或发送目标；
+- 慢客户端的瞬时 delta 可以合并或丢弃，terminal event 不可丢；
+- 超出发送缓冲时关闭连接，客户端使用 `Last-Event-ID` 重连；
+- 服务器只绑定 loopback，这是 M0-M2 的产品范围，不是认证或安全保证；
+- 首版以普通文本节点显示模型内容，不提供可执行 HTML 渲染。
+
+## 12. Structured MCP 工具与身份
+
+Structured 每个 MCP 请求上下文必须带内部 binding，不把它暴露为可编辑工具参数。Deprecated Direct 没有 runtime/MCP attachment 入口。
+
+selected transport 不是 Structured、对应 Adapter 的 native MCP capability 尚未 `verified`，或 Agent 已由独立的外部强制策略 evidence 投影为 `native_policy_blocked` 时，MCP attachment/HTTP 入口返回稳定 `MCP_UNAVAILABLE`（HTTP 503），不能改用 `SESSION_NOT_AVAILABLE`，也不能 fallback 到 Direct。普通 attach/call 失败本身不能生成 `native_policy_blocked`。
+
+首版工具面：
+
+```text
+aichatlink.send
+aichatlink.ask
+aichatlink.watch
+aichatlink.steer
+aichatlink.read
+aichatlink.memory.search
+aichatlink.memory.remember
+aichatlink.core_memory_remember
+aichatlink.identity.read
+aichatlink.identity.remember
+```
+
+`watch`/`steer` 在工具发现面上对 Structured session 可见，但只有当前 Turn 是本次配对的 observer Watch Turn 时才能成功执行。它们不是审批层，不能 allow/deny 单次原生工具。
+
+`core_memory_remember` 不接受 scope、subject、author 或 binding 参数；Broker 从当前 session binding 固定 `scope_id=subject=author=调用 Agent` 以及 `agentMemoryType=core`。`identity.remember` 的 subject 同样固定为调用方自身。其他 Agent 对该身份的描述可以进入普通公共 memory，记录 `author != subject`，不能冒充对方的自我记忆。
+
+操作员面是独立 MCP 入口 `/mcp/operator`，只挂在稳定 `local-operator` binding（`binding:operator` / `user:assistant`）上。它不要求当前 Agent Turn，也不提供 `watch`/`steer`。成员面 `/mcp` 保持原样。操作员工具作者由 binding 固定为 `user:assistant`；写请求出现 `from`/`actor`/`provenance` 仍返回 `SENDER_FIELD_FORBIDDEN`。默认派活工具是 `worker_dispatch` / `worker_ask`；`send` 只用于公开说话。操作员 `read` 与成员 `aichatlink.read` 共用输入合同，但投影更窄：默认 `limit=20`，只返回公开语义事件（`message.created`、`operator.dispatch`、监督与终态 turn、`context.reset` 等），并把正文摘到约 2000 字。`turn.reasoning.recorded` 与 `tool.progress.recorded` 不进操作员 read，避免把审计全文回灌助理脑。成员当前回合 `aichatlink.read` 仍按原合同返回 correlation 事件。
+
+## 13. A2A 映射边界
+
+未来 A2A Adapter 可以映射：
+
+| AIChatLink | A2A |
+| --- | --- |
+| actor/agent registry | Agent Card |
+| message.created | Message |
+| correlation + turns | Task |
+| attachment reference | Artifact/Part |
+| turn terminal state | Task status |
+
+内部 AIChatLink Envelope 不引入远程 discovery、认证协商或完整 A2A Task store。A2A Adapter 是 Broker 的外部入口/出口，不替换核心路由。
+
+## 14. 协议错误
+
+```text
+INVALID_ENVELOPE
+UNKNOWN_ACTOR
+UNKNOWN_TARGET
+SENDER_FIELD_FORBIDDEN
+CLIENT_COMMAND_CONFLICT
+DUPLICATE_DISPATCH
+CAUSAL_CYCLE
+ROOT_TURN_LIMIT_REACHED
+HOP_LIMIT_REACHED
+QUEUE_CAPACITY_REACHED
+MESSAGE_TOO_LARGE
+ASK_TIMEOUT
+STEER_LIMIT_REACHED
+SUPERVISION_WATCH_REQUIRED
+SUPERVISION_STEER_REQUIRED
+SUPERVISION_PAIR_INVALID
+TRANSPORT_MODE_MISMATCH
+UNEXPECTED_NATIVE_INTERACTION
+NATIVE_POLICY_BLOCKED
+MCP_BINDING_MISMATCH
+MCP_UNAVAILABLE
+```
+
+错误进入公共房间还是只进入诊断流取决于影响范围：影响用户操作的错误必须公开可见；纯协议噪声可进入有界诊断摘要，但不得静默改变消息语义。
+
+## 15. 版本规则
+
+- 新增可选字段属于向后兼容；
+- 改变字段含义、删除字段或改变状态机需要提升 schema version；
+- 未知 event type 应保留并允许 UI 以 generic event 渲染，但 `approval.*`、`permission.*` 和 `user_input.*` 是保留禁止命名空间，不得进入 AIChatLink event store 或 generic UI；
+- Adapter 原生 schema 变化不直接提升 AIChatLink schema，除非归一化语义变化；
+- 协议变更必须同时更新 fixtures、存储迁移和端到端测试。

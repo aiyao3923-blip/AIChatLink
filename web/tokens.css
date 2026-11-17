@@ -1,0 +1,254 @@
+/* ==========================================================================
+   AIChatLink — design tokens ("paper & ink")
+   Shared by the room (/index.html) and the roster editor (/setup.html).
+   One accent, one type scale, three surfaces. Nothing else gets a new value.
+   ========================================================================== */
+
+:root {
+  color-scheme: light;
+
+  /* --- surfaces: canvas → paper → raised well ---------------------------- */
+  --canvas: #faf9f5;
+  --paper: #ffffff;
+  --paper-2: #f4f1e8;
+  --well: #f2eee4;
+
+  /* --- ink --------------------------------------------------------------- */
+  --ink: #191711;
+  --ink-2: #37332a;
+  --muted: #6e6a5f;
+  --faint: #8b8678;
+
+  /* --- hairlines --------------------------------------------------------- */
+  --line: #e6e2d6;
+  --line-2: #d5cfbe;
+  --line-3: #b8b0a0;
+
+  /* --- one accent -------------------------------------------------------- */
+  --accent: #a8481f;
+  --accent-deep: #8a3817;
+  --accent-bright: #c2622f;
+  --accent-ink: #fff8f2;
+  --accent-wash: rgba(168, 72, 31, 0.08);
+  --accent-line: rgba(168, 72, 31, 0.3);
+
+  /* --- status ------------------------------------------------------------ */
+  --ok: #2f7a5b;
+  --ok-wash: rgba(47, 122, 91, 0.1);
+  --warn: #9a6b12;
+  --warn-wash: rgba(154, 107, 18, 0.1);
+  --danger: #b0322c;
+  --danger-wash: rgba(176, 50, 44, 0.08);
+  --info: #3a6ea5;
+  --info-wash: rgba(58, 110, 165, 0.08);
+
+  /* --- agent tones: avatars and names only ------------------------------- */
+  --tone-codex: #1f6b5c;
+  --tone-grok: #3b4a99;
+  --tone-kimi: #7a3f7f;
+  --tone-hermes: #8a5a16;
+  --tone-claude: #b4552d;
+  --tone-pi: #2f5d8a;
+  --tone-workbuddy: #1f6b8a;
+  --tone-user: #191711;
+  --tone-system: #6e6a5f;
+
+  /* --- type -------------------------------------------------------------- */
+  --font-sans: "Noto Sans SC", Inter, ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", STSong,
+    Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas,
+    "Liberation Mono", monospace;
+
+  --fs-10: 0.625rem;
+  --fs-11: 0.6875rem;
+  --fs-12: 0.75rem;
+  --fs-13: 0.8125rem;
+  --fs-14: 0.875rem;
+  --fs-15: 0.9375rem;
+  --fs-16: 1rem;
+  --fs-20: 1.25rem;
+  --fs-26: 1.625rem;
+  --fs-34: 2.125rem;
+
+  --lh-tight: 1.25;
+  --lh-snug: 1.5;
+  --lh-body: 1.8;
+
+  /* --- space (4px base) --------------------------------------------------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+
+  /* --- geometry ----------------------------------------------------------- */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-pill: 999px;
+  --r-avatar: 10px;
+
+  /* --- depth -------------------------------------------------------------- */
+  --shadow-1: 0 1px 2px rgba(25, 23, 17, 0.05);
+  --shadow-2: 0 1px 2px rgba(25, 23, 17, 0.04), 0 8px 24px rgba(25, 23, 17, 0.07);
+  --shadow-3: 0 2px 6px rgba(25, 23, 17, 0.06), 0 24px 48px rgba(25, 23, 17, 0.12);
+
+  /* --- motion ------------------------------------------------------------- */
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #14120e;
+  --paper: #1f1c16;
+  --paper-2: #27231b;
+  --well: #2c271e;
+
+  --ink: #f4f1e6;
+  --ink-2: #dad5c7;
+  --muted: #a29c8e;
+  --faint: #7c766a;
+
+  --line: #332e25;
+  --line-2: #423b30;
+  --line-3: #564e3f;
+
+  --accent: #e0824f;
+  --accent-deep: #f0a077;
+  --accent-bright: #e9936a;
+  --accent-ink: #1a1815;
+  --accent-wash: rgba(224, 130, 79, 0.12);
+  --accent-line: rgba(224, 130, 79, 0.34);
+
+  --ok: #6fc0a1;
+  --ok-wash: rgba(111, 192, 161, 0.12);
+  --warn: #d8a05a;
+  --warn-wash: rgba(216, 160, 90, 0.12);
+  --danger: #e8837c;
+  --danger-wash: rgba(232, 131, 124, 0.12);
+  --info: #8fb6dd;
+  --info-wash: rgba(143, 182, 221, 0.12);
+
+  --tone-codex: #6fc0ab;
+  --tone-grok: #9aa6e8;
+  --tone-kimi: #c9a0d6;
+  --tone-hermes: #d8a05a;
+  --tone-claude: #e9936a;
+  --tone-pi: #8fb6dd;
+  --tone-workbuddy: #7fc9dd;
+  --tone-user: #f4f1e6;
+  --tone-system: #a29c8e;
+
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-2: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.4);
+  --shadow-3: 0 2px 8px rgba(0, 0, 0, 0.4), 0 28px 56px rgba(0, 0, 0, 0.55);
+}
+
+/* --- base ---------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--canvas);
+  color: var(--ink-2);
+  font-family: var(--font-sans);
+  font-size: var(--fs-14);
+  line-height: var(--lh-snug);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--ink);
+}
+
+button,
+textarea,
+select,
+input {
+  color: inherit;
+  font: inherit;
+}
+
+button,
+select,
+input[type="checkbox"] {
+  cursor: pointer;
+}
+
+button:disabled,
+textarea:disabled,
+select:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--r-pill);
+  background: var(--line-2);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--line-3);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

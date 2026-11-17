@@ -1,0 +1,103 @@
+import type {
+  McpAskInput,
+  McpAskResult,
+  McpCollectInput,
+  McpCollectResult,
+  McpCoreMemoryRememberInput,
+  McpCoreMemoryRememberResult,
+  McpIdentityReadInput,
+  McpIdentityReadResult,
+  McpIdentityRememberInput,
+  McpIdentityRememberResult,
+  McpMemoryRememberInput,
+  McpMemoryRememberResult,
+  McpMemorySearchInput,
+  McpMemorySearchResult,
+  McpPublishInput,
+  McpPublishResult,
+  McpReadInput,
+  McpReadResult,
+  McpSendInput,
+  McpSendResult,
+  McpSteerInput,
+  McpSteerResult,
+  McpWatchInput,
+  McpWatchResult
+} from "../../contracts/mcp.js";
+import type { McpBindingContext } from "../binding-registry.js";
+
+/**
+ * Provenance supplied to Broker operations for one MCP tool invocation.
+ *
+ * The binding fields come from the Adapter/session registry, never from tool
+ * arguments. They associate normal AIChatLink traffic with an actor; they are not
+ * authentication or authorization evidence.
+ */
+export interface ToolCallerContext {
+  readonly bindingId: string;
+  readonly actorId: string;
+  readonly instanceId: string;
+  readonly nativeSessionId?: string;
+  readonly activeTurnId?: string;
+  readonly mcpRequestId: string | number;
+  readonly signal: AbortSignal;
+}
+
+export function toToolCallerContext(
+  binding: McpBindingContext,
+  input: {
+    readonly requestId: string | number;
+    readonly signal: AbortSignal;
+  }
+): ToolCallerContext {
+  return {
+    bindingId: binding.bindingId,
+    actorId: binding.actorId,
+    instanceId: binding.instanceId,
+    ...(binding.nativeSessionId === undefined
+      ? {}
+      : { nativeSessionId: binding.nativeSessionId }),
+    ...(binding.activeTurnId === undefined
+      ? {}
+      : { activeTurnId: binding.activeTurnId }),
+    mcpRequestId: input.requestId,
+    signal: input.signal
+  };
+}
+
+/**
+ * Product-facing dependency of the MCP adapter.
+ *
+ * Implementations own persistence, routing, causal checks and actor/domain
+ * validation. This MCP module only validates the public contract, supplies the
+ * bound caller context and converts results to MCP CallToolResult values.
+ */
+export interface ToolBrokerApi {
+  send(caller: ToolCallerContext, input: McpSendInput): Promise<McpSendResult>;
+  publish(caller: ToolCallerContext, input: McpPublishInput): Promise<McpPublishResult>;
+  ask(caller: ToolCallerContext, input: McpAskInput): Promise<McpAskResult>;
+  collect(caller: ToolCallerContext, input: McpCollectInput): Promise<McpCollectResult>;
+  watch(caller: ToolCallerContext, input: McpWatchInput): Promise<McpWatchResult>;
+  steer(caller: ToolCallerContext, input: McpSteerInput): Promise<McpSteerResult>;
+  read(caller: ToolCallerContext, input: McpReadInput): Promise<McpReadResult>;
+  memorySearch(
+    caller: ToolCallerContext,
+    input: McpMemorySearchInput
+  ): Promise<McpMemorySearchResult>;
+  memoryRemember(
+    caller: ToolCallerContext,
+    input: McpMemoryRememberInput
+  ): Promise<McpMemoryRememberResult>;
+  coreMemoryRemember(
+    caller: ToolCallerContext,
+    input: McpCoreMemoryRememberInput
+  ): Promise<McpCoreMemoryRememberResult>;
+  identityRead(
+    caller: ToolCallerContext,
+    input: McpIdentityReadInput
+  ): Promise<McpIdentityReadResult>;
+  identityRemember(
+    caller: ToolCallerContext,
+    input: McpIdentityRememberInput
+  ): Promise<McpIdentityRememberResult>;
+}
