@@ -190,6 +190,7 @@ export class AIChatLinkBroker {
   readonly #clock: NonNullable<BrokerDependencies["clock"]>;
   readonly #idFactory: NonNullable<BrokerDependencies["idFactory"]>;
   readonly #defaultRoomId: string;
+  readonly #agentOrder: BrokerDependencies["agentOrder"];
   readonly #partialCheckpointChars: number;
   readonly #nativeCancelTimeoutMs: number;
   readonly #closeTimeoutMs: number;
@@ -236,6 +237,7 @@ export class AIChatLinkBroker {
     this.#clock = dependencies.clock ?? { now: nowIso };
     this.#idFactory = dependencies.idFactory ?? createId;
     this.#defaultRoomId = dependencies.defaultRoomId ?? DEFAULT_ROOM_ID;
+    this.#agentOrder = dependencies.agentOrder;
     this.#partialCheckpointChars =
       dependencies.partialCheckpointChars ?? DEFAULT_PARTIAL_CHECKPOINT_CHARS;
     this.#nativeCancelTimeoutMs =
@@ -1305,11 +1307,13 @@ export class AIChatLinkBroker {
       agents: this.#adapters.list().map((adapter) => {
         const actor = this.#store.getActor(adapter.actorId);
         const health = healthByActor.get(adapter.actorId)!;
+        const order = this.#agentOrder?.get(adapter.actorId);
         return {
           actorId: adapter.actorId,
           displayName: actor?.displayName ?? adapter.actorId,
           status: health.status,
-          ...(health.instanceId === undefined ? {} : { instanceId: health.instanceId })
+          ...(health.instanceId === undefined ? {} : { instanceId: health.instanceId }),
+          ...(order === undefined ? {} : { order })
         };
       }),
       recentEvents: snapshot.recentEvents.map(toEnvelope),

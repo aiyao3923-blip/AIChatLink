@@ -179,6 +179,7 @@ function configToDraft(
       identity: agent.identity ?? "",
       ...(agent.model === undefined || agent.model.length === 0 ? {} : { model: agent.model }),
       ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
+      ...(agent.order === undefined ? {} : { order: agent.order }),
       ...(agent.piConfig === undefined ? {} : { piConfig: agent.piConfig }),
       command: {
         executable: agent.command.executable,
@@ -205,6 +206,7 @@ function draftToDocument(
         ...(agent.identity?.trim().length ? { identity: agent.identity.trim() } : {}),
         ...(agent.model?.trim().length ? { model: agent.model.trim() } : {}),
         ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
+        ...(agent.order === undefined ? {} : { order: agent.order }),
         ...(agent.piConfig === undefined ? {} : { piConfig: agent.piConfig }),
         command:
           agent.command.prefixArgs.length === 0

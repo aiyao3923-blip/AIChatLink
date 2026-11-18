@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { disabledConfiguredActorIds, pendingConfiguredAgents } from "../../../web/agent-roster.js";
+import {
+  compareRosterOrder,
+  disabledConfiguredActorIds,
+  pendingConfiguredAgents
+} from "../../../web/agent-roster.js";
 
 describe("pendingConfiguredAgents", () => {
   it("projects a newly saved enabled agent without replacing the active runtime roster", () => {
@@ -115,5 +119,55 @@ describe("disabledConfiguredActorIds", () => {
   it("re-enabling after a save puts the live agent back in the roster", () => {
     const snapshot = { existing: true, config: { agents: [{ id: "codex", enabled: true }] } };
     expect([...(disabledConfiguredActorIds(snapshot, ["agent:codex"]) ?? [])]).toEqual([]);
+  });
+});
+
+describe("roster order", () => {
+  it("honours an explicit order before the actorId tiebreak", () => {
+    const roster = [
+      { actorId: "agent:pi-lead", order: 2 },
+      { actorId: "agent:pi-intent", order: 1 },
+      { actorId: "agent:pi-plain", order: 8 },
+      { actorId: "agent:pi-architect", order: 3 }
+    ];
+    expect(roster.sort(compareRosterOrder).map((agent) => agent.actorId)).toEqual([
+      "agent:pi-intent",
+      "agent:pi-lead",
+      "agent:pi-architect",
+      "agent:pi-plain"
+    ]);
+  });
+
+  it("keeps unordered agents after ordered ones, in actorId order", () => {
+    const roster = [
+      { actorId: "agent:codex" },
+      { actorId: "agent:pi-lead", order: 2 },
+      { actorId: "agent:claude" },
+      { actorId: "agent:pi-intent", order: 1 }
+    ];
+    expect(roster.sort(compareRosterOrder).map((agent) => agent.actorId)).toEqual([
+      "agent:pi-intent",
+      "agent:pi-lead",
+      "agent:claude",
+      "agent:codex"
+    ]);
+  });
+
+  it("carries a saved order through the pending projection", () => {
+    const pending = pendingConfiguredAgents(
+      {
+        config: {
+          agents: [
+            { id: "plain", name: "人话", cwd: "D:/A", enabled: true, order: 8 },
+            { id: "intent", name: "意图", cwd: "D:/A", enabled: true, order: 1 }
+          ]
+        }
+      },
+      new Set<string>()
+    );
+    expect(pending.map((agent) => [agent.actorId, agent.order])).toEqual([
+      ["agent:intent", 1],
+      ["agent:plain", 8]
+    ]);
   });
 });

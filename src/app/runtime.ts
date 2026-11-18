@@ -433,6 +433,11 @@ export class AIChatLinkRuntime {
           queuePerActor: this.config.limits.queuePerAgent
         },
         selectedTransport: this.config.transport,
+        agentOrder: new Map(
+          Object.entries(this.config.agents)
+            .filter(([, agent]) => agent.order !== undefined)
+            .map(([agentId, agent]) => [`agent:${agentId}`, agent.order as number])
+        ),
         defaultRoomId: this.roomId,
         nativeCancelTimeoutMs: this.config.timeouts.cancelMs,
         closeTimeoutMs: this.config.timeouts.closeMs,

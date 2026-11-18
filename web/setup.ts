@@ -20,6 +20,8 @@ interface AgentDraft {
   thinking?: string;
   /** pi only: share the user's own ~/.pi/agent instead of the isolated copy. */
   piConfig?: "isolated" | "shared";
+  /** Roster position in the room header; carried through saves untouched. */
+  order?: number;
   command: {
     executable: string;
     prefixArgs: string[];

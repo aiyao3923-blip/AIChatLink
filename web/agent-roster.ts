@@ -6,6 +6,7 @@ export interface PendingConfiguredAgent {
   cwd: string;
   enabled: true;
   capabilities: string[];
+  order?: number;
 }
 
 type JsonRecord = Record<string, unknown>;
@@ -19,6 +20,31 @@ interface ConfiguredAgentEntry {
   driver: string;
   cwd: string;
   enabled: boolean;
+  order?: number;
+}
+
+/** One field of a roster item the order rule needs; both projections satisfy it. */
+export interface RosterOrderable {
+  actorId: string;
+  order?: number;
+}
+
+/**
+ * Roster order: the explicit `order` an operator saved in `aichatlink.json`
+ * wins; anything without one keeps the historical actorId order and sits after
+ * the ordered entries. Ordering is presentation only — dispatch, `@all` and the
+ * ask tool never depend on it.
+ */
+export function compareRosterOrder(left: RosterOrderable, right: RosterOrderable): number {
+  const leftOrdered = typeof left.order === "number" && Number.isFinite(left.order);
+  const rightOrdered = typeof right.order === "number" && Number.isFinite(right.order);
+  if (leftOrdered && rightOrdered && left.order !== right.order) {
+    return (left.order as number) - (right.order as number);
+  }
+  if (leftOrdered !== rightOrdered) {
+    return leftOrdered ? -1 : 1;
+  }
+  return left.actorId.localeCompare(right.actorId);
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -44,12 +70,15 @@ function readConfiguredAgent(
   const cwd = typeof value.cwd === "string" && value.cwd.trim().length > 0;
   const directory = typeof value.cwd === "string" ? value.cwd.trim() : workspace;
   const driver = typeof value.driver === "string" ? value.driver.trim() : "";
+  const order =
+    typeof value.order === "number" && Number.isFinite(value.order) ? value.order : undefined;
   return {
     actorId: `agent:${id}`,
     displayName: name || id,
     driver,
     cwd: cwd || directory.length === 0 ? directory : workspace,
-    enabled: value.enabled === true
+    enabled: value.enabled === true,
+    ...(order === undefined ? {} : { order })
   };
 }
 
@@ -79,10 +108,11 @@ export function pendingConfiguredAgents(
       driver: entry.driver,
       cwd: entry.cwd,
       enabled: true,
-      capabilities: []
+      capabilities: [],
+      ...(entry.order === undefined ? {} : { order: entry.order })
     });
   }
-  return [...pending.values()].sort((left, right) => left.actorId.localeCompare(right.actorId));
+  return [...pending.values()].sort(compareRosterOrder);
 }
 
 /**

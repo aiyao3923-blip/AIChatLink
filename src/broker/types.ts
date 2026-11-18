@@ -158,6 +158,8 @@ export interface BrokerDependencies {
   steerLimit?: number;
   watchTimeoutMs?: number;
   selectedTransport: RuntimeTransport;
+  /** Roster position per full actor id (`agent:<id>`); presentation only. */
+  agentOrder?: ReadonlyMap<string, number>;
   clock?: BrokerClock;
   idFactory?: BrokerIdFactory;
   defaultRoomId?: string;

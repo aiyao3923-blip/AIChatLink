@@ -52,6 +52,8 @@ export const SetupAgentDraftSchema = z
     model: z.string().trim().max(200).optional(),
     /** Reasoner effort; omitted/empty means "use the driver default". */
     thinking: SetupAgentThinkingSchema.optional(),
+    /** Roster position in the room header; presentation only. */
+    order: z.number().int().min(0).max(9_999).optional(),
     /** pi only: share the user's own pi config instead of the isolated copy. */
     piConfig: z.enum(["isolated", "shared"]).optional(),
     command: SetupCommandDraftSchema,

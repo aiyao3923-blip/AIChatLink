@@ -464,7 +464,9 @@ export const AgentProjectionSchema = z
     instanceId: ReferenceIdSchema.optional(),
     cwd: z.string().min(1).max(32_768).optional(),
     enabled: z.boolean().optional(),
-    capabilities: z.json().optional()
+    capabilities: z.json().optional(),
+    /** Explicit roster position; presentation only. */
+    order: z.number().int().optional()
   })
   .passthrough();
 

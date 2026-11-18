@@ -6,7 +6,7 @@ import {
   eventInEpoch,
   turnActivityState
 } from "./conversation-epoch.js";
-import { disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
+import { compareRosterOrder, disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
 import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./empty-voice.js";
 import {
   TERMINAL_TURN_STATUSES,
@@ -68,6 +68,8 @@ interface AgentView {
   cwd: string;
   enabled: boolean;
   capabilities: string[];
+  /** Explicit roster position from `aichatlink.json`; absent means actorId order. */
+  order?: number;
 }
 
 interface TurnView {
@@ -585,6 +587,8 @@ function normalizeAgent(value: unknown): AgentView | null {
     (actorRecord ? readStringField(actorRecord, "displayName") : "") ||
     actorId;
   const capabilityRecord = isRecord(value.capabilities) ? value.capabilities : null;
+  const order =
+    typeof value.order === "number" && Number.isFinite(value.order) ? value.order : undefined;
   return {
     actorId,
     displayName,
@@ -594,6 +598,7 @@ function normalizeAgent(value: unknown): AgentView | null {
     cwd: readStringField(value, "cwd", "workingDirectory"),
     enabled: readBooleanField(value, true, "enabled"),
     capabilities: normalizeCapabilities(value.capabilities).filter((name) => name !== "piDriver"),
+    ...(order === undefined ? {} : { order })
   };
 }
 
@@ -2472,7 +2477,7 @@ function acceptEnvelope(
 }
 
 function orderedAgents(): AgentView[] {
-  return Array.from(state.agents.values()).sort((left, right) => left.actorId.localeCompare(right.actorId));
+  return Array.from(state.agents.values()).sort(compareRosterOrder);
 }
 
 interface ResumedConversationRef {

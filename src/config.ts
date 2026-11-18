@@ -80,6 +80,12 @@ const agentConfigSchema = z
     /** Native reasoning effort. Unsupported levels are left to the driver default. */
     thinking: z.enum(AGENT_THINKING_LEVELS).optional(),
     /**
+     * Roster position in the top bar / activity rail. Presentation only: it
+     * never affects dispatch, `@all`, or how many times a role may be called.
+     * Omitted keeps the historical actorId order.
+     */
+    order: z.number().int().min(0).max(9_999).optional(),
+    /**
      * pi only. `shared` mounts the user's own pi capability surface
      * (settings, extensions, Agents, skills, full model catalog) in the role
      * directory; `isolated` keeps the bounded credential copy. Default:
