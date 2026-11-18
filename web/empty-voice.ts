@@ -20,11 +20,11 @@ export const ROOM_VOICE: EmptyVoice = {
   source: "空房间，第一次发言之前"
 };
 
-/** A configured but disabled Agent: expected silence, not an error. */
-export const DISABLED_VOICE: EmptyVoice = {
-  quote: "它还在名册上，只是没被叫醒。",
-  source: "名册，安静的一页"
-};
+/**
+ * A configured but disabled Agent: expected silence, not an error. This one is a
+ * note rather than an epigraph — the pane already has a heading to carry it.
+ */
+export const DISABLED_NOTE = "它还没被叫醒；历史输出仍可查看，启用后才会接新回合。";
 
 const ROLE_VOICES: ReadonlyArray<{ role: string; voice: EmptyVoice }> = [
   {

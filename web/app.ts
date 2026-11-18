@@ -7,7 +7,7 @@ import {
   turnActivityState
 } from "./conversation-epoch.js";
 import { disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
-import { DISABLED_VOICE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./empty-voice.js";
+import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./empty-voice.js";
 import {
   TERMINAL_TURN_STATUSES,
   activeTurnActorIds,
@@ -5162,19 +5162,25 @@ function setPaneVoice(pane: PaneContext, voice: EmptyVoice | undefined): void {
     text.textContent = `「${voice.quote}」`;
   }
   if (source !== null) {
-    source.textContent = `—— ${voice.source}`;
+    source.textContent = voice.source;
   }
 }
 
 function refreshPaneEmptyCopy(pane: PaneContext): void {
-  const heading = pane.empty.querySelector("h3");
+  const heading = pane.empty.querySelector<HTMLElement>("h3");
   const paragraph =
-    pane.empty.querySelector(".pane-empty-note") ?? pane.empty.querySelector("p");
+    pane.empty.querySelector<HTMLElement>(".pane-empty-note") ??
+    pane.empty.querySelector<HTMLElement>("p");
   if (heading === null || paragraph === null) {
     return;
   }
   // Every branch that does not name a voice must clear the previous one.
   setPaneVoice(pane, undefined);
+  // "solo" = the epigraph is the only line (agent lane with a known role), so
+  // the state line above it becomes a placard label instead of a title.
+  pane.empty.dataset.voice = "off";
+  heading.hidden = false;
+  paragraph.hidden = false;
   if (pane.lens.kind === "agent") {
     const agent = state.agents.get(pane.lens.actorId);
     if (agent === undefined) {
@@ -5184,13 +5190,27 @@ function refreshPaneEmptyCopy(pane: PaneContext): void {
     }
     if (!agent.enabled) {
       heading.textContent = `「${agent.displayName}」已停用`;
-      paragraph.textContent = "历史输出仍可查看；启用后新回合才会出现在这里。";
-      setPaneVoice(pane, DISABLED_VOICE);
+      // The charm line lives in the note: one sentence that both explains the
+      // silence and says what is still reachable.
+      paragraph.textContent = DISABLED_NOTE;
+      return;
+    }
+    const voice = emptyVoiceFor(agent.displayName);
+    if (voice !== undefined) {
+      // The lane header already names the Agent and the state dot already says
+      // it is ready, so the state line becomes a quiet label above the epigraph
+      // instead of the loudest thing in the pane. The sentence explaining what
+      // will appear here is dropped: it restated the heading.
+      heading.textContent = `还没有「${agent.displayName}」的输出`;
+      paragraph.hidden = true;
+      pane.empty.dataset.voice = "on";
+      setPaneVoice(pane, voice);
       return;
     }
     heading.textContent = `还没有「${agent.displayName}」的输出`;
-    paragraph.textContent = "本轮发给该 Agent 的内容会出现在这里。";
-    setPaneVoice(pane, emptyVoiceFor(agent.displayName));
+    // Unknown roles keep the state line and lose the instruction sentence.
+    paragraph.hidden = true;
+    setPaneVoice(pane, undefined);
     return;
   }
   if (conversationView !== null) {
@@ -5204,7 +5224,9 @@ function refreshPaneEmptyCopy(pane: PaneContext): void {
     return;
   }
   heading.textContent = "房间已就绪";
-  paragraph.textContent = "保持 @all 并行提问，或只勾选一个 Agent 单独对话。监督由房间 Agent 的 send/ask 启动。";
+  // With an epigraph present the instruction sentence is dropped: the line
+  // already says the first move belongs to the operator.
+  paragraph.hidden = true;
   setPaneVoice(pane, ROOM_VOICE);
 }
 

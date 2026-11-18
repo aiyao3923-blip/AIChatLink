@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DISABLED_VOICE, ROOM_VOICE, emptyVoiceFor } from "../../../web/empty-voice.js";
+import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor } from "../../../web/empty-voice.js";
 
 const ROLE_NAMES = ["提案", "批判", "设计", "总管", "审查", "核验"] as const;
 
@@ -27,8 +27,12 @@ describe("empty-pane voices", () => {
     }
   });
 
+  it("keeps the disabled note short enough to read in a lane", () => {
+    expect(Array.from(DISABLED_NOTE).length).toBeLessThanOrEqual(30);
+  });
+
   it("keeps every line inside the one-line pane budget", () => {
-    const voices = [ROOM_VOICE, DISABLED_VOICE, ...ROLE_NAMES.map((role) => emptyVoiceFor(role))];
+    const voices = [ROOM_VOICE, ...ROLE_NAMES.map((role) => emptyVoiceFor(role))];
     for (const voice of voices) {
       expect(voice).toBeDefined();
       // The view wraps the line in 「」; 24 CJK characters still fit one line
