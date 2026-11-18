@@ -42,6 +42,35 @@ This file defines the implementation boundary for agents working in this reposit
 - Any change to a protocol or persistence invariant must update the corresponding document and decision entry in the same change.
 - Reference projects are design evidence, not source-code dependencies. Do not copy code without a separate license/provenance decision.
 
+## Commit discipline (archival checkpoints)
+
+A key or necessary functional change is not finished when it works — it is finished when it is committed as a checkpoint with a note. Apply this to every feature, driver, protocol, storage, or behavioural change you implement in this repository.
+
+- **The commit gate is verification, not intent.** Before committing a functional change, run `npm run typecheck` and `npm test` and require them to pass. If the change touches a driver, protocol, or Gate contract, also run the relevant versioned probe (`npm run m0:probe:fixtures`, plus the specific `m0:probe:*` / `m0:validate*` entry for the touched driver) and record the result. Put what you actually ran in the commit body.
+- **One verified change, one commit.** Commit as soon as the change passes its gate. Do not accumulate several unrelated verified changes into one mixed commit, and do not commit an unfinished change merely because other files in the tree are dirty.
+- **Never commit unverified work.** If the tests fail, are skipped, or the required probe evidence cannot be produced, leave the change uncommitted and report the failing gate. "Committed so it is saved" is not a checkpoint.
+- **Stage by explicit path** (`git add <paths>`). Never `git add -A` or `git add .` in a dirty tree, and never stage ignored/generated artifacts or secrets: `dist/`, `node_modules/`, `coverage/`, `tmp/`, `_tmp/`, `aichatlink.json`, `*.db*`, `.env*`, generated credential copies. Read `git status` and `git diff --staged` before committing.
+- **Docs ship inside the same commit.** Any protocol, persistence, or invariant change commits its `docs/` update and decision entry together with the code, never as a later cleanup commit.
+- **Every checkpoint carries a note, not only a subject.** Use:
+
+  ```text
+  <type>(<scope>): <imperative summary, <= 72 chars>
+
+  Why: <the problem or decision this change implements>
+  What: <the behavioural surface that changed; key files/areas>
+
+  Verification:
+  - npm run typecheck -> pass
+  - npm test -> pass (N files, M tests)
+  - <probe/gate command> -> pass | not_observed
+
+  Invariants: <product invariants touched, or "none">
+  ```
+
+  `type` is one of `feat | fix | refactor | docs | test | chore`; `scope` is the subsystem (`broker`, `storage`, `web`, `driver/<name>`, `m0`, `agents`, ...). Use the labels from "Validation language" and never write `verified` without recorded evidence. Multi-line bodies are written with `git commit -F -` (or a message file), not repeated `-m`.
+- **Do not rewrite verified checkpoints.** No `--amend`, `git reset --hard`, `rebase`, or `--no-verify` on a commit that already recorded a passing gate; fix forward with a new commit instead.
+- **Local only.** Do not `git push` unless the user asks; checkpoints stay on the local branch.
+
 ## Validation language
 
 Use these labels in implementation notes:
