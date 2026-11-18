@@ -9,7 +9,8 @@
 .app-shell {
   --rail-w: 72px;
   --sidebar-w: 296px;
-  --column: min(1040px, calc(100% - 96px));
+  --column-max: 1040px;
+  --column: min(var(--column-max), calc(100% - 96px));
   --gutter: max(48px, calc((100% - 1040px) / 2));
   --drawer-w: min(380px, 34vw);
   display: grid;
@@ -797,6 +798,10 @@
   min-height: 0;
   flex-direction: column;
   background: var(--canvas);
+  /* The composer dock is the only consumer: the rail collapses below the card
+     when the room itself gets narrow, not when the viewport does. */
+  container-name: room;
+  container-type: inline-size;
 }
 
 .conversation-panel {
@@ -1331,7 +1336,8 @@
   }
 }
 
-.event-card.is-highlighted {
+.event-card.is-highlighted,
+.turn-card.is-highlighted {
   background: var(--accent-wash);
   border-radius: var(--r-md);
   box-shadow: 0 0 0 8px var(--accent-wash);
@@ -1813,18 +1819,35 @@
 
 /* ------------------------------------------------------------- composer */
 
+/* One row at the bottom of the reading column: the composer keeps the left
+   share, the live agent rail takes the right. The dock, not the timeline, is
+   what stays aligned with the column. */
+.composer-dock {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  gap: 10px;
+  /* The rail sits in the same row, so the pair needs the rail's width plus the
+     card's own measure. Keeping the dock on the reading column would charge that
+     width to the card alone and squeeze the input whenever the window is narrow;
+     a 24px gutter charges it to the panel instead, so the card keeps its width
+     and stretches leftwards. Above 1088px the column is capped anyway and this
+     equals var(--column). */
+  width: min(var(--column-max), calc(100% - 48px));
+  margin: 0 auto 10px;
+}
+
 .composer {
   /* The bar's widgets are dropped by the composer's own width, not the viewport's:
      a 1024px window with the assistant drawer open leaves less room than a 900px
      window with it closed. */
   container-type: inline-size;
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
   flex-direction: column;
   gap: 6px;
-  width: var(--column);
   padding: 10px 12px 8px;
-  margin: 0 auto 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-lg);
   background: var(--paper);
@@ -1835,6 +1858,104 @@
 .composer:focus-within {
   border-color: var(--line-3);
   box-shadow: var(--shadow-2);
+}
+
+/* Live work rail. This is not a second roster: no names, no restart, no config.
+   It answers only "who is still working", and clicking jumps to that agent's
+   latest visible reply. */
+.composer-agents {
+  display: grid;
+  /* Two rows, row-major: composer code sets repeat(ceil(N/2), 30px). */
+  grid-auto-flow: row;
+  grid-auto-rows: 30px;
+  gap: 5px;
+  flex: 0 0 auto;
+  max-width: min(240px, 27%);
+  /* The working ring lives 3px outside the 30px avatar; the padding keeps the
+     scroll container from clipping it. */
+  padding: 4px 3px 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.composer-agents::-webkit-scrollbar {
+  display: none;
+}
+
+.composer-agents[hidden] {
+  display: none;
+}
+
+.composer-agent {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--tone, var(--muted)) 11%, transparent);
+  color: var(--tone, var(--muted));
+  font-family: var(--font-mono);
+  font-size: var(--fs-11);
+  font-weight: 600;
+  line-height: 1;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+
+.composer-agent:hover,
+.composer-agent:focus-visible {
+  border-color: color-mix(in srgb, var(--tone, var(--line-2)) 34%, var(--line));
+  background: color-mix(in srgb, var(--tone, var(--muted)) 18%, transparent);
+}
+
+.composer-agent:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.composer-agent[data-working="true"] {
+  background: color-mix(in srgb, var(--tone, var(--muted)) 18%, transparent);
+}
+
+.composer-agent-ring {
+  position: absolute;
+  inset: -3px;
+  display: none;
+  border: 2px solid color-mix(in srgb, var(--tone, var(--accent)) 24%, transparent);
+  border-top-color: var(--tone, var(--accent));
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.composer-agent[data-working="true"] .composer-agent-ring {
+  display: block;
+  animation: spin 900ms linear infinite;
+}
+
+.composer-agent[data-finished]::after {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--canvas);
+  content: "";
+  pointer-events: none;
+}
+
+.composer-agent[data-finished="failed"]::after {
+  background: var(--danger);
+}
+
+.composer-agent[data-finished="cancelled"]::after,
+.composer-agent[data-finished="interrupted"]::after {
+  background: var(--faint);
 }
 
 .composer-bar {
@@ -2165,18 +2286,14 @@
   background: var(--danger);
 }
 
-/* Sacrifice order as the composer narrows: the meter, then the working
-   directory, then the room-context figure. Wrapping to a second row is the last
-   resort — this bar is meant to stay one line. Declared after the base rules so
-   the container conditions win on source order. */
+/* Sacrifice order as the composer narrows: the meter, then the workspace path,
+   then the room-context figure, then the workspace label. The `＋` itself is
+   never sacrificed — it is navigation, not decoration, and the rail must not be
+   able to take the working-directory switcher off the bar. Wrapping to a second
+   row is the last resort — this bar is meant to stay one line. Declared after
+   the base rules so the container conditions win on source order. */
 @container (max-width: 860px) {
   .context-usage-meter {
-    display: none;
-  }
-}
-
-@container (max-width: 800px) {
-  .composer-workspace {
     display: none;
   }
 }
@@ -2184,6 +2301,23 @@
 @container (max-width: 560px) {
   .context-usage {
     display: none;
+  }
+}
+
+/* The rail moves under the card once the room, not the viewport, cannot hold
+   both. The send button and the rail stay in one visual unit either way. */
+@container room (max-width: 900px) {
+  .composer-dock {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+
+  .composer-agents {
+    order: 2;
+    max-width: none;
+    justify-content: end;
+    padding: 4px 3px 3px;
   }
 }
 
@@ -2353,6 +2487,43 @@
 .send-icon {
   width: 13px;
   height: 13px;
+}
+
+.send-spinner {
+  display: none;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 1.5px solid color-mix(in srgb, currentColor 32%, transparent);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 800ms linear infinite;
+}
+
+.send-button.is-working .send-icon {
+  display: none;
+}
+
+.send-button.is-working .send-spinner {
+  display: block;
+}
+
+/* A disabled button normally drops to --faint and 45% opacity; the working
+   ring needs full contrast to read as motion instead of a dead control. */
+.send-button.is-working:disabled {
+  color: var(--ink-2);
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-agent[data-working="true"] .composer-agent-ring,
+  .send-spinner {
+    animation: none;
+  }
+
+  .composer-agent[data-working="true"] .composer-agent-ring {
+    border-color: var(--tone, var(--accent));
+  }
 }
 
 #character-count[hidden] {
@@ -2808,7 +2979,7 @@
     display: none;
   }
 
-  .composer {
+  .composer-dock {
     width: calc(100% - 24px);
     margin-bottom: 8px;
   }
@@ -2826,7 +2997,7 @@
 }
 
 @media (max-width: 520px) {
-  .send-button span:not(.send-icon) {
+  .send-button span:not(.send-icon):not(.send-spinner) {
     display: none;
   }
 
@@ -2904,35 +3075,42 @@
   list-style: none;
 }
 
+/* Rows are the unit inside a directory group: give each one a paper face so it
+   separates from the group's canvas and from its neighbours. */
 .conversation-item {
   display: flex;
   align-items: center;
   gap: 2px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: var(--r-sm);
+  background: var(--paper);
   transition: background var(--dur-1) var(--ease),
     border-color var(--dur-1) var(--ease);
 }
 
-.conversation-item:hover:not(.is-active) {
-  border-color: var(--line);
-  background: var(--paper);
+.conversation-item:hover:not(.is-viewing) {
+  border-color: var(--line-2);
+  background: var(--paper-2);
 }
 
-/* The open conversation is the only accent in this column. */
+/* The live epoch keeps receiving turns, but it is not the selection. One step
+   stronger edge is all it gets; `当前` in the meta line carries the meaning. */
 .conversation-item.is-active {
-  border-color: var(--accent-line);
+  border-color: var(--line-2);
+}
+
+/* The selection is whatever the main timeline is showing — replayed history
+   included. It is the only accent in this column: a solid accent edge plus a
+   1px ring, which reads as one 2px outline without shifting the row. */
+.conversation-item.is-viewing {
+  border-color: var(--accent);
   background: var(--accent-wash);
-  box-shadow: inset 2px 0 0 var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
-.conversation-item.is-active .conversation-title {
+.conversation-item.is-viewing .conversation-title {
   color: var(--ink);
-  font-weight: 500;
-}
-
-.conversation-item.is-hidden-conversation {
-  opacity: 0.65;
+  font-weight: 600;
 }
 
 .conversation-open {
@@ -2967,42 +3145,41 @@
   font-size: var(--fs-10);
 }
 
-.conversation-hide {
+.conversation-delete {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
   margin-right: 2px;
+  padding: 0;
   border: 0;
   border-radius: var(--r-xs);
   background: transparent;
   color: var(--muted);
-  font-size: var(--fs-12);
   cursor: pointer;
   opacity: 0;
 }
 
-.conversation-item:hover .conversation-hide,
-.conversation-item:focus-within .conversation-hide {
+.conversation-delete svg {
+  width: 13px;
+  height: 13px;
+}
+
+.conversation-item:hover .conversation-delete,
+.conversation-item:focus-within .conversation-delete {
   opacity: 1;
 }
 
-.conversation-hide:hover {
+.conversation-delete:hover {
   background: var(--well);
-  color: var(--ink);
+  color: var(--danger);
 }
 
-.show-hidden-conversations {
-  align-self: flex-start;
-  padding: 2px 4px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: var(--fs-10);
-  cursor: pointer;
-}
-
-.show-hidden-conversations:hover {
-  color: var(--ink-2);
+.conversation-delete:disabled {
+  cursor: progress;
+  opacity: 0.4;
 }
 
 /* The room workspace is read-only chrome; editing lives on /setup. */
@@ -3606,6 +3783,33 @@
   color: var(--accent);
 }
 
+/* The switcher collapses by part, never as a whole: at ≤800 the path text goes,
+   at ≤700 the label follows and only the 24px plus remains (same shape the
+   ≤760px viewport rule uses). Declared after the base rules above so the
+   container conditions win on source order. */
+@container (max-width: 800px) {
+  #composer-workspace-path {
+    display: none;
+  }
+}
+
+@container (max-width: 700px) {
+  .composer-workspace {
+    flex: 0 0 auto;
+    padding: 2px;
+  }
+
+  .composer-workspace-label {
+    display: none;
+  }
+
+  .composer-workspace-plus {
+    width: 24px;
+    height: 24px;
+    font-size: var(--fs-12);
+  }
+}
+
 /* --------------------------------------------------------------- dialogs */
 
 .sheet-dialog {
@@ -4032,4 +4236,369 @@
 .workspace-group[data-active="true"] .workspace-group-head {
   border-radius: var(--r-sm);
   background: var(--paper-2);
+}
+
+/* ---------------------------------------------------------------- pane grid */
+/* One page = one live room; a pane is a projection, not a second app instance.
+   Six tracks let 1/2/3/4/5/6 panes tile without odd holes (see pane-lens.ts). */
+
+.pane-grid {
+  display: grid;
+  /* Before initPanes() sets the six-track inline plan, the static #timeline is
+     the only child: one full-width track avoids a one-sixth-width first paint. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-rows: minmax(0, 1fr);
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  background: var(--line);
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--canvas);
+}
+
+.pane-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 34px;
+  flex: 0 0 34px;
+  padding: 0 6px 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--paper-2);
+}
+
+.pane-avatar {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: var(--r-avatar);
+  background: color-mix(in srgb, var(--tone, var(--muted)) 12%, transparent);
+  color: var(--tone, var(--muted));
+  font-size: var(--fs-10);
+  font-weight: 600;
+  line-height: 1;
+}
+
+.pane-lens {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  padding: 2px 2px;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-12);
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.pane-lens:hover {
+  border-color: var(--line-2);
+  background: var(--paper);
+}
+
+.pane-lens:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.pane-state {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+.pane-state[data-state="room"],
+.pane-state[hidden] {
+  display: none;
+}
+
+.pane-state[data-state="ready"] {
+  background: var(--ok);
+}
+
+.pane-state[data-state="working"] {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.pane-state[data-state="starting"],
+.pane-state[data-state="restarting"],
+.pane-state[data-state="unknown"] {
+  background: var(--warn);
+}
+
+.pane-state[data-state="failed"] {
+  background: var(--danger);
+}
+
+.pane-state[data-state="disabled"],
+.pane-state[data-state="missing"] {
+  background: var(--faint);
+}
+
+.pane-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+  cursor: pointer;
+}
+
+.pane-jump:hover {
+  border-color: var(--line-3);
+  color: var(--accent-deep);
+}
+
+.pane-jump svg {
+  width: 12px;
+  height: 12px;
+}
+
+.pane-jump[hidden] {
+  display: none;
+}
+
+.pane-jump-count[hidden] {
+  display: none;
+}
+
+.pane-close {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-16);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pane-close:hover {
+  background: var(--paper);
+  color: var(--danger);
+}
+
+html[data-panes="single-room"] .pane-grid {
+  gap: 0;
+  background: transparent;
+}
+
+html[data-panes="single-room"] .pane-head {
+  display: none;
+}
+
+html[data-panes="grid"] .timeline-actions {
+  display: none;
+}
+
+html[data-panes="grid"] .pane .timeline {
+  padding: 6px 16px 20px;
+}
+
+html[data-panes="grid"] .pane .empty-state {
+  max-width: none;
+  padding: 0 16px;
+}
+
+html[data-panes="grid"] .pane-empty .empty-orbit {
+  width: 34px;
+  height: 34px;
+  margin-bottom: var(--s-3);
+}
+
+html[data-panes="grid"] .pane-empty h3 {
+  font-size: var(--fs-16);
+}
+
+html[data-panes="grid"] .pane-empty p {
+  font-size: var(--fs-12);
+}
+
+/* A lane collapses the operator's prompt to one line: the six-lane wall is for
+   watching Agents, and six copies of a long brief would push every lane down. */
+.lane-prompt {
+  margin: 2px 0 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--well);
+}
+
+.lane-prompt > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 8px;
+  color: var(--muted);
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  list-style: none;
+  cursor: pointer;
+}
+
+.lane-prompt > summary::-webkit-details-marker {
+  display: none;
+}
+
+.lane-prompt[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.lane-prompt-kicker {
+  flex: 0 0 auto;
+  color: var(--ink-2);
+  font-weight: 600;
+}
+
+.lane-prompt-time {
+  flex: 0 0 auto;
+  color: var(--faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+}
+
+.lane-prompt-excerpt {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lane-prompt-body {
+  padding: 8px 10px 4px;
+}
+
+/* ------------------------------------------------------------ panes dialog */
+
+.panes-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.panes-layouts,
+.panes-assign {
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--line);
+}
+
+.panes-layout-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--s-2);
+}
+
+.panes-layout {
+  padding: 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-size: var(--fs-12);
+  cursor: pointer;
+}
+
+.panes-layout:hover {
+  border-color: var(--line-3);
+}
+
+.panes-layout[aria-pressed="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+  color: var(--accent-deep);
+}
+
+.panes-status {
+  min-height: 16px;
+  margin: var(--s-2) 0 0;
+  color: var(--muted);
+  font-size: var(--fs-11);
+  line-height: 1.5;
+}
+
+.panes-assignments {
+  display: grid;
+  gap: 6px;
+  max-height: 240px;
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.panes-assignment {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panes-assignment-index {
+  width: 56px;
+  flex: 0 0 56px;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+  letter-spacing: 0.08em;
+}
+
+.panes-assignment select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-xs);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--fs-12);
+}
+
+.panes-assignment select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.panes-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+}
+
+@media (max-width: 760px) {
+  html[data-panes="grid"] .pane-grid {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-auto-rows: minmax(300px, auto);
+    overflow-y: auto;
+  }
+
+  html[data-panes="grid"] .pane {
+    grid-column: auto !important;
+    min-height: 300px;
+  }
 }

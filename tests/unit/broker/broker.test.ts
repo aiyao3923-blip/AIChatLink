@@ -169,6 +169,19 @@ interface Fixture {
 
 const fixtures = new Set<Fixture>();
 
+function conversationUsage(): import("../../../src/memory/types.js").RoomContextUsage {
+  return {
+    roomId: "room:main",
+    throughSeq: 1,
+    estimatedCharacters: 160,
+    maxCharacters: 256_000,
+    compactionTriggerCharacters: 192_000,
+    utilizationPercent: 0,
+    uncompactedMessageCount: 0,
+    compactable: false
+  };
+}
+
 function seedBindings(store: SqliteAIChatLinkStore): void {
   const seeds = [
     ["user:web", "web", "instance:web", "binding:web", "local-rest"],
@@ -702,6 +715,273 @@ describe.sequential("AIChatLinkBroker acceptance, dispatch and terminal semantic
     // The boundary between them is the reset event itself, so the active epoch
     // starts after a one-seq gap instead of continuing the visible range.
     expect(conversations[0]!.startSeq).toBeGreaterThan(conversations[1]!.endSeq! + 1);
+  });
+
+  it("deletes a closed conversation without touching the open one", async () => {
+    const usage = conversationUsage();
+    let store: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => {
+          const throughSeq = store!.getRoomHighWaterSeq(roomId);
+          store!.recordContextReset({ roomId, throughSeq });
+          return { reset: true, throughSeq, resetNativeSessions: false, usage };
+        },
+        resumeNow: () => ({
+          reset: true,
+          throughSeq: usage.throughSeq,
+          resetNativeSessions: false,
+          usage
+        })
+      }
+    });
+    store = fixture.store;
+    const first = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "delete-first", to: ["agent:codex"], content: "delete me" }
+    });
+    await fixture.broker.waitForIdle();
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "delete-reset",
+      roomId: "room:main"
+    });
+    await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "delete-second", to: ["agent:codex"], content: "keep me" }
+    });
+    await fixture.broker.waitForIdle();
+
+    const closed = fixture.broker
+      .listConversations("room:main")
+      .find((conversation) => !conversation.active)!;
+    const publishedBefore = fixture.published.length;
+    const result = await fixture.broker.deleteConversationFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "delete-closed",
+      conversationId: closed.conversationId,
+      roomId: "room:main"
+    });
+    expect(result.conversationId).toBe(closed.conversationId);
+    expect(result.deletedEvents).toBeGreaterThan(0);
+    expect(result.deletedTurns).toBe(1);
+    // A closed epoch needs no reset, so nothing is published.
+    expect(fixture.published).toHaveLength(publishedBefore);
+    expect(fixture.store.getEvent(first.messageEventId)).toBeUndefined();
+
+    const remaining = fixture.broker.listConversations("room:main");
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0]).toMatchObject({ active: true, empty: false });
+
+    // The delete is idempotent for one clientCommandId.
+    await expect(
+      fixture.broker.deleteConversationFromBinding({
+        bindingId: "binding:web",
+        clientCommandId: "delete-closed",
+        conversationId: closed.conversationId,
+        roomId: "room:main"
+      })
+    ).resolves.toEqual(result);
+    await expect(
+      fixture.broker.deleteConversationFromBinding({
+        bindingId: "binding:web",
+        clientCommandId: "delete-missing",
+        conversationId: "conv:9999",
+        roomId: "room:main"
+      })
+    ).rejects.toMatchObject({ code: "UNKNOWN_TARGET" });
+  });
+
+  it("closes the open conversation before purging it and restarts native sessions", async () => {
+    const usage = conversationUsage();
+    const restarted: string[] = [];
+    let store: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => {
+          const throughSeq = store!.getRoomHighWaterSeq(roomId);
+          store!.recordContextReset({ roomId, throughSeq, resetNativeSessions: true });
+          return { reset: true, throughSeq, resetNativeSessions: true, usage };
+        },
+        resumeNow: () => ({
+          reset: true,
+          throughSeq: usage.throughSeq,
+          resetNativeSessions: false,
+          usage
+        })
+      },
+      agentController: {
+        restart: (actorId: string) => {
+          restarted.push(`restart:${actorId}`);
+        },
+        restartFresh: (actorId: string) => {
+          restarted.push(`fresh:${actorId}`);
+        }
+      }
+    });
+    store = fixture.store;
+    const first = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "delete-open", to: ["agent:codex"], content: "the open one" }
+    });
+    await fixture.broker.waitForIdle();
+    const open = fixture.broker.listConversations("room:main")[0]!;
+    expect(open.active).toBe(true);
+
+    const result = await fixture.broker.deleteConversationFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "delete-open-1",
+      conversationId: open.conversationId,
+      roomId: "room:main",
+      resetNativeSessions: true
+    });
+    expect(result).toMatchObject({ conversationId: open.conversationId, deletedTurns: 1 });
+    expect(fixture.store.getEvent(first.messageEventId)).toBeUndefined();
+    // Every adapter restarts fresh: the deleted text must not survive inside a
+    // native session.
+    expect(restarted.sort()).toEqual([
+      "fresh:agent:codex",
+      "fresh:agent:grok",
+      "fresh:agent:kimi"
+    ]);
+    expect(fixture.published.at(-1)).toMatchObject({
+      type: "context.reset",
+      body: { resetNativeSessions: true }
+    });
+
+    const conversations = fixture.broker.listConversations("room:main");
+    expect(conversations).toHaveLength(1);
+    expect(conversations[0]).toMatchObject({ active: true, empty: true });
+    expect(conversations[0]!.startSeq).toBeGreaterThan(open.startSeq);
+    // Only the closing reset event is left in the transcript.
+    expect(fixture.store.countEvents("room:main")).toBe(1);
+    expect(fixture.store.hasRoomContextMessage("room:main", open.startSeq - 1)).toBe(false);
+  });
+
+  it("numbers a new conversation by the ones that survived deletion", async () => {
+    const usage = conversationUsage();
+    let store: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => {
+          const throughSeq = store!.getRoomHighWaterSeq(roomId);
+          store!.recordContextReset({ roomId, throughSeq });
+          return { reset: true, throughSeq, resetNativeSessions: false, usage };
+        },
+        resumeNow: () => ({
+          reset: true,
+          throughSeq: usage.throughSeq,
+          resetNativeSessions: false,
+          usage
+        })
+      }
+    });
+    store = fixture.store;
+    for (const [index, content] of ["first", "second", "third"].entries()) {
+      if (index > 0) {
+        await fixture.broker.resetContextFromBinding({
+          bindingId: "binding:web",
+          clientCommandId: `renumber-reset-${index}`,
+          roomId: "room:main"
+        });
+      }
+      await fixture.broker.acceptMessage({
+        bindingId: "binding:web",
+        request: { clientCommandId: `renumber-message-${index}`, to: ["agent:codex"], content }
+      });
+      await fixture.broker.waitForIdle();
+    }
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "renumber-reset-open",
+      roomId: "room:main"
+    });
+
+    const remaining = () => fixture.broker.listConversations("room:main");
+    // Three real conversations, then the empty open one: it is the row the next
+    // send lands in, so it carries the next number.
+    expect(remaining()[0]).toMatchObject({ active: true, empty: true, title: "对话 4" });
+
+    const remove = (conversationId: string) =>
+      fixture.broker.deleteConversationFromBinding({
+        bindingId: "binding:web",
+        clientCommandId: `renumber-delete-${conversationId}`,
+        conversationId,
+        roomId: "room:main",
+        resetNativeSessions: false
+      });
+
+    const [oldest, middle, newest] = remaining()
+      .filter((conversation) => !conversation.active)
+      .map((conversation) => conversation.conversationId);
+    await remove(oldest!);
+    expect(remaining()[0]!.title).toBe("对话 3");
+    await remove(middle!);
+    expect(remaining()[0]!.title).toBe("对话 2");
+    await remove(newest!);
+    expect(remaining()).toHaveLength(1);
+    // Everything in this directory is gone: the open one is conversation 1.
+    expect(remaining()[0]).toMatchObject({ active: true, empty: true, title: "对话 1" });
+
+    // Deleting the open one reseeds the counter instead of continuing it.
+    await remove(remaining()[0]!.conversationId);
+    expect(remaining()).toHaveLength(1);
+    expect(remaining()[0]).toMatchObject({ active: true, empty: true, title: "对话 1" });
+  });
+
+  it("refuses to delete a conversation while a turn is in flight", async () => {
+    const usage = conversationUsage();
+    const release = deferred();
+    let store: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => ({
+          reset: false,
+          throughSeq: store!.getRoomHighWaterSeq(roomId),
+          resetNativeSessions: false,
+          usage
+        }),
+        resumeNow: () => ({
+          reset: true,
+          throughSeq: usage.throughSeq,
+          resetNativeSessions: false,
+          usage
+        })
+      }
+    });
+    store = fixture.store;
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await release.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "late answer" });
+    };
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "delete-busy", to: ["agent:codex"], content: "still running" }
+    });
+    await waitUntil(
+      () => fixture.store.getTurn(accepted.turns[0]!.turnId)?.status === "running"
+    );
+    const open = fixture.broker.listConversations("room:main")[0]!;
+    await expect(
+      fixture.broker.deleteConversationFromBinding({
+        bindingId: "binding:web",
+        clientCommandId: "delete-busy-1",
+        conversationId: open.conversationId,
+        roomId: "room:main"
+      })
+    ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+    release.resolve();
+    await fixture.broker.waitForIdle();
+    expect(fixture.store.getEvent(accepted.messageEventId)).toBeDefined();
   });
 
   it("rejects resuming an unknown or still-open conversation", async () => {

@@ -67,6 +67,20 @@
               <path d="M4.5 5.5h15v10h-9l-4.5 3.6v-3.6h-1.5z"/>
             </svg>
           </button>
+          <button
+            id="panes-toggle"
+            class="icon-action"
+            type="button"
+            aria-label="多窗格"
+            title="多窗格：并排监看多个 Agent"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <rect x="3.5" y="4.5" width="7.4" height="6.4" rx="1.2"/>
+              <rect x="13.1" y="4.5" width="7.4" height="6.4" rx="1.2"/>
+              <rect x="3.5" y="13.1" width="7.4" height="6.4" rx="1.2"/>
+              <rect x="13.1" y="13.1" width="7.4" height="6.4" rx="1.2"/>
+            </svg>
+          </button>
           <a class="icon-action" href="/setup" aria-label="配置" title="配置">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
               <circle cx="12" cy="12" r="3.1"/>
@@ -98,7 +112,6 @@
             class="conversation-groups"
             aria-label="按工作目录分组的对话"
           ></div>
-          <button id="show-hidden-conversations" class="show-hidden-conversations" type="button" hidden>显示已隐藏</button>
         </section>
       </aside>
 
@@ -110,6 +123,7 @@
           </span>
           <button id="viewing-banner-exit" class="text-button" type="button">回到当前对话</button>
         </div>
+        <div id="pane-grid" class="pane-grid" data-count="1">
         <ol
           id="timeline"
           class="timeline"
@@ -124,6 +138,7 @@
             <p>连接完成后，可以选择一个 Agent 或使用 @all 并行发起对话。</p>
           </li>
         </ol>
+        </div>
 
         <div id="timeline-actions" class="timeline-actions">
           <section
@@ -186,6 +201,7 @@
           </button>
         </div>
 
+        <div id="composer-dock" class="composer-dock">
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>
             <div>
@@ -275,11 +291,20 @@
                 <svg class="send-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                   <path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2Z" fill="currentColor"/>
                 </svg>
+                <span class="send-spinner" aria-hidden="true"></span>
                 <span>发送</span>
               </button>
             </div>
           </div>
         </form>
+        <aside
+          id="composer-agents"
+          class="composer-agents"
+          aria-label="Agent 工作状态"
+          hidden
+        ></aside>
+        </div>
+        <span id="agent-activity-live" class="sr-only" aria-live="polite"></span>
       </main>
 
       <aside id="assistant-drawer" class="assistant-drawer" hidden>
@@ -387,6 +412,35 @@
           <button id="workspace-use" class="primary-button" type="button">使用此目录</button>
         </div>
       </section>
+    </dialog>
+
+    <dialog id="panes-dialog" class="sheet-dialog panes-dialog" aria-labelledby="panes-dialog-title">
+      <header class="sheet-head">
+        <div>
+          <p class="eyebrow">Panes</p>
+          <h2 id="panes-dialog-title">多窗格</h2>
+        </div>
+        <button id="panes-close" class="icon-button" type="button" aria-label="关闭多窗格">×</button>
+      </header>
+      <section class="panes-layouts">
+        <p class="sheet-label">布局</p>
+        <div id="panes-layouts" class="panes-layout-buttons" role="group" aria-label="窗格布局">
+          <button type="button" class="panes-layout" data-count="1">单窗格</button>
+          <button type="button" class="panes-layout" data-count="2">并排两格</button>
+          <button type="button" class="panes-layout" data-count="4">四方格</button>
+          <button type="button" class="panes-layout" data-count="6">全员六格</button>
+        </div>
+        <p id="panes-status" class="panes-status" role="status" aria-live="polite"></p>
+      </section>
+      <section class="panes-assign">
+        <p class="sheet-label">每格显示</p>
+        <ol id="panes-assignments" class="panes-assignments"></ol>
+      </section>
+      <footer class="panes-actions">
+        <button id="panes-fill-agents" class="secondary-button" type="button">按 Agent 铺满</button>
+        <button id="panes-reset" class="text-button" type="button">重置为单窗格</button>
+        <button id="panes-open-window" class="text-button" type="button">在新窗口打开当前目录</button>
+      </footer>
     </dialog>
 
     <template id="agent-template">

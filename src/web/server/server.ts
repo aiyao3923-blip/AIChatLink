@@ -21,6 +21,8 @@ import {
   parseResumeConversationRequest,
   parseCompactContextResult,
   parseConversationList,
+  parseDeleteConversationRequest,
+  parseDeleteConversationResult,
   parseRoomContextResetResult,
   parseContractOutput,
   parseCreateMessageAccepted,
@@ -79,8 +81,11 @@ interface StaticAsset {
     | "index.html"
     | "app.js"
     | "agent-roster.js"
+    | "agent-activity.js"
     | "conversation-epoch.js"
     | "pagination.js"
+    | "pane-lens.js"
+    | "pane-view.js"
     | "reasoning-record.js"
     | "rich-text.js"
     | "tool-progress.js"
@@ -97,8 +102,11 @@ const STATIC_ASSETS = new Map<string, StaticAsset>([
   ["/", { fileName: "index.html", contentType: "text/html; charset=utf-8" }],
   ["/app.js", { fileName: "app.js", contentType: "application/javascript; charset=utf-8" }],
   ["/agent-roster.js", { fileName: "agent-roster.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/agent-activity.js", { fileName: "agent-activity.js", contentType: "application/javascript; charset=utf-8" }],
   ["/conversation-epoch.js", { fileName: "conversation-epoch.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pagination.js", { fileName: "pagination.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/pane-lens.js", { fileName: "pane-lens.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/pane-view.js", { fileName: "pane-view.js", contentType: "application/javascript; charset=utf-8" }],
   ["/reasoning-record.js", { fileName: "reasoning-record.js", contentType: "application/javascript; charset=utf-8" }],
   ["/rich-text.js", { fileName: "rich-text.js", contentType: "application/javascript; charset=utf-8" }],
   ["/tool-progress.js", { fileName: "tool-progress.js", contentType: "application/javascript; charset=utf-8" }],
@@ -832,6 +840,21 @@ export class AIChatLinkHttpServer {
           validateBrokerOutput(
             parseRoomContextResetResult,
             await this.#options.broker.resumeConversation(body, abort.signal)
+          )
+        );
+        return;
+      }
+      if (url.pathname === "/api/conversations/delete") {
+        if (method !== "POST") return methodNotAllowed(response, ["POST"]);
+        const body = parseDeleteConversationRequest(
+          await readJsonBody(request, this.#options.maxRequestBodyBytes)
+        );
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseDeleteConversationResult,
+            await this.#options.broker.deleteConversation(body, abort.signal)
           )
         );
         return;

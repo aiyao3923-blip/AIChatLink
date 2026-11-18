@@ -688,6 +688,22 @@ export interface ContextResumeSeed {
   throughSeq: number;
 }
 
+/**
+ * One conversation epoch's inclusive seq range, purged from the transcript.
+ * A deleted conversation is not append-only history any more: the rows stop
+ * existing, so `seq` ranges keep holes and every cursor compares monotonically.
+ */
+export interface PurgeConversationRangeInput {
+  roomId: string;
+  fromSeq: number;
+  throughSeq: number;
+}
+
+export interface PurgeConversationRangeResult {
+  deletedEvents: number;
+  deletedTurns: number;
+}
+
 export interface IntegrityCheckResult {
   ok: boolean;
   messages: string[];
@@ -760,6 +776,13 @@ export interface AIChatLinkStore {
   ): { seq: number; occurredAt: string; content: string } | undefined;
   /** Whether an epoch holds any room-context message, for empty-epoch projection. */
   hasRoomContextMessage(roomId: string, afterSeq: number, throughSeq?: number): boolean;
+  /**
+   * Permanently removes one conversation epoch: its events, the Turns they
+   * created (plus their attempts, supervision links and dated-memory sources)
+   * and every summary that covered the range. Memory records survive as the
+   * separate data class; only their source-event pointer is cleared.
+   */
+  purgeConversationRange(input: PurgeConversationRangeInput): PurgeConversationRangeResult;
   attachSupervisionWorkerTurn(input: {
     pairId: string;
     turnId: string;

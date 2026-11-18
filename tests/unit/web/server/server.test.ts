@@ -12,6 +12,7 @@ import type {
   CompactContextResult,
   CreateMessageAccepted,
   CreateMessageRequest,
+  DeleteConversationResult,
   IdentityQuery,
   MemoryQuery,
   RememberIdentityRequest,
@@ -98,6 +99,14 @@ class FakeBroker implements BrokerApi {
         compactable: false
       }
     };
+  }
+
+  deleteConversation(
+    request: { clientCommandId: string; conversationId: string; resetNativeSessions?: boolean },
+    _signal: AbortSignal
+  ): Awaitable<DeleteConversationResult> {
+    this.calls.push({ method: "deleteConversation", value: request });
+    return { conversationId: request.conversationId, deletedEvents: 12, deletedTurns: 2 };
   }
 
   resetContext(request: { clientCommandId: string }, _signal: AbortSignal): Awaitable<RoomContextResetResult> {
@@ -821,6 +830,48 @@ describe("AIChatLinkHttpServer", () => {
     expect(broker.calls).toHaveLength(callsBeforeInvalid);
 
     const wrongMethod = await fetch(`${origin}/api/conversations/resume`);
+    expect(wrongMethod.status).toBe(405);
+  });
+
+  it("deletes a conversation with a strict body", async () => {
+    const deleted = await fetch(`${origin}/api/conversations/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clientCommandId: "web-delete-1",
+        conversationId: "conv:1",
+        resetNativeSessions: true
+      })
+    });
+    expect(deleted.status).toBe(200);
+    expect(await deleted.json()).toEqual({
+      conversationId: "conv:1",
+      deletedEvents: 12,
+      deletedTurns: 2
+    });
+    expect(broker.calls.at(-1)).toEqual({
+      method: "deleteConversation",
+      value: { clientCommandId: "web-delete-1", conversationId: "conv:1", resetNativeSessions: true }
+    });
+
+    const callsBeforeInvalid = broker.calls.length;
+    const invalid = await fetch(`${origin}/api/conversations/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientCommandId: "web-delete-2" })
+    });
+    expect(invalid.status).toBe(400);
+    expect(broker.calls).toHaveLength(callsBeforeInvalid);
+
+    const extra = await fetch(`${origin}/api/conversations/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientCommandId: "web-delete-3", conversationId: "conv:1", hard: true })
+    });
+    expect(extra.status).toBe(400);
+    expect(broker.calls).toHaveLength(callsBeforeInvalid);
+
+    const wrongMethod = await fetch(`${origin}/api/conversations/delete`);
     expect(wrongMethod.status).toBe(405);
   });
 

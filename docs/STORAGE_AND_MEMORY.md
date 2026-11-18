@@ -375,6 +375,25 @@ schema v10 为 `context_resets` 增加三列续聊种子：`resume_conversation_
 - 恢复源只接受**已关闭**对话；起点取源对话的 `resumedFrom.fromSeq`（没有则自己的 `startSeq`），终点取 `endSeq`，因此连续续聊仍能回到最初那段对话。
 - 进程重启后无需额外状态：纪元边界、种子与对话列表全部由 `context_resets` 行重建，`conversationId=conv:<startSeq>` 保持稳定。
 
+### 3.15 对话删除（conversation purge）
+
+D-043 让「删除对话」变成真正的本地清除。事件行会消失，`seq` 留空洞但不重编号（`sqlite_sequence` 不回退，游标一律 `>` 比较）。
+
+一个事务内按 child-first 顺序处理一个纪元的 `[fromSeq, throughSeq]`：
+
+1. `supervision_pair_turns` / `supervision_steer_counts`（引用将要删除的 Turn 或 pair）；
+2. `agent_dated_memory_sources`（`turn_id` / `source_event_id` / `response_event_id` 命中区间），并按剩余未处理源重算受影响 `agent_dated_memory_rollups` 的 `pending_turns / pending_chars / pending_through_seq / first_pending_at / last_pending_at`；
+3. `turn_attempts`、`supervision_pairs`；
+4. `memory_records.source_event_id`、`identity_records.source_event_id`、区间外 `events.reply_to_event_id` 置空；
+5. 覆盖区间的 `summaries` 删除；
+6. `turns`（含由 `parent_turn_id` 递归得到的子回合），最后 `events`。
+
+回合可能跨出它所在的纪元：reset 落在回合运行中，或子回合在边界之后才入队。这些回合的 `body.turnId` 命中清除集合时，它自己的 `turn.*` / `tool.progress.recorded` 事件即使在区间之后也一并删除，避免留下没有回合的终态卡片。
+
+`context_resets` 不删：纪元边界保持不变，`conversationId=conv:<startSeq>` 因此不会被后来的纪元复用。删除活动纪元时，broker 先走一次普通 reset（`context.reset` + 可选 `restartFresh`）再清除旧区间，房间随后剩一个空的开放纪元；空纪元在 `/api/conversations` 里带 `empty:true`，侧栏不渲染它。
+
+记忆是独立数据类：已写下的 core / dated 记忆内容不因删除对话而消失，只失去指向被删事件的来源指针；需要清除记忆时按 §11 的记忆操作单独处理。
+
 `operator.dispatch` 是房间 durable event，不是侧边对话行。body 只含 `content`、`operation`、`promptLength`、`targets`；作者是 `user:assistant`。它可重放，并作为被叫醒 worker 的当前任务；UI 默认折叠，不当普通聊天气泡。监督 pair 在无 `message.created` 任务时引用该 event id。
 
 ## 4. 事务不变量

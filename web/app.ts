@@ -7,10 +7,28 @@ import {
   turnActivityState
 } from "./conversation-epoch.js";
 import { disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
+import {
+  TERMINAL_TURN_STATUSES,
+  activeTurnActorIds,
+  isFinishedTransition
+} from "./agent-activity.js";
 import { parseReasoningRecord } from "./reasoning-record.js";
 import { copyPlainText, flashButtonLabel, renderRichContent } from "./rich-text.js";
 import { describeToolProgress, mergeToolProgressSnapshot } from "./tool-progress.js";
 import { formatCharacterEstimate } from "./usage-format.js";
+import {
+  MAX_PANES,
+  PANE_TRACKS,
+  defaultPanes,
+  formatPaneLens,
+  lensAccepts,
+  normalizePanes,
+  paneSpans,
+  parsePaneLens,
+  roomLens,
+  type PaneLens
+} from "./pane-lens.js";
+import { createPaneShell, fillPaneLensOptions, type PaneShell } from "./pane-view.js";
 
 type JsonRecord = Record<string, unknown>;
 type ConnectionState = "bootstrapping" | "connecting" | "live" | "reconnecting" | "offline";
@@ -57,6 +75,17 @@ interface TurnView {
   status: string;
   correlationId: string;
   error: string;
+}
+
+/** A live Turn that just reached a terminal status, kept until the operator looks. */
+interface FinishedAgent {
+  status: string;
+  turnId: string;
+}
+
+interface RenderTurnOptions {
+  /** POST 202 and bootstrap snapshots may describe a Turn the SSE already advanced. */
+  seedOnly?: boolean;
 }
 
 interface RecordView {
@@ -110,6 +139,13 @@ interface DeltaBucket {
   key: string;
   pieces: DeltaPiece[];
   mode: "content" | "reasoning";
+  /** Resolved once at acceptance; lane filtering must not guess it again. */
+  targetActorId: string | null;
+}
+
+interface PaneLogEntry {
+  envelope: AIChatLinkEnvelope;
+  targetActorId: string | null;
 }
 
 interface AppState {
@@ -126,6 +162,8 @@ interface AppState {
   pendingSubmission: PendingSubmission | null;
   replacing: { id: string } | null;
   submitting: boolean;
+  /** Recent visible envelopes, used to refill a pane created mid-conversation. */
+  paneLog: PaneLogEntry[];
 }
 
 interface ApiFailureShape {
@@ -151,13 +189,14 @@ const DELTA_BATCH_MS = 32;
 const RECONNECT_MIN_MS = 250;
 const RECONNECT_MAX_MS = 10_000;
 const DEFAULT_ROOM_ID = "room:main";
-const TERMINAL_TURN_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 /** A turn in one of these states may still emit events after a conversation reset. */
 const IN_FLIGHT_TURN_STATUSES = new Set(["dispatching", "running", "cancelling", "cancel_requested"]);
 const DRAFT_STORAGE_KEY = "aichatlink:draft";
 const THEME_STORAGE_KEY = "aichatlink:theme";
 const SIDEBAR_STORAGE_KEY = "aichatlink:sidebar";
-const HIDDEN_CONVERSATIONS_KEY = "aichatlink:hidden-conversations";
+const PANES_STORAGE_KEY = "aichatlink:panes";
+/** Enough to refill a new pane in the same order; deltas are never logged. */
+const PANE_LOG_MAX = 300;
 const COLLAPSED_WORKSPACES_KEY = "aichatlink:collapsed-workspaces";
 const TIMELINE_MAX_ITEMS = 500;
 const TIMELINE_TRIM_BATCH = 100;
@@ -222,6 +261,7 @@ const state: AppState = {
   pendingSubmission: null,
   replacing: null,
   submitting: false,
+  paneLog: [],
 };
 
 function byId<T extends HTMLElement>(id: string): T {
@@ -238,11 +278,17 @@ const composerWorkspacePath = byId<HTMLSpanElement>("composer-workspace-path");
 const globalError = byId<HTMLDivElement>("global-error");
 const agentList = byId<HTMLUListElement>("agent-list");
 const agentCount = byId<HTMLSpanElement>("agent-count");
-const timeline = byId<HTMLOListElement>("timeline");
-const timelineEmpty = byId<HTMLLIElement>("timeline-empty");
-const jumpLatest = byId<HTMLButtonElement>("jump-latest");
-const jumpLatestCount = byId<HTMLSpanElement>("jump-latest-count");
+/** Assigned by usePaneContext(); the primary pane owns the static #timeline. */
+let timeline!: HTMLOListElement;
+let timelineEmpty!: HTMLLIElement;
+const legacyJumpLatest = byId<HTMLButtonElement>("jump-latest");
+const legacyJumpLatestCount = byId<HTMLSpanElement>("jump-latest-count");
+let jumpLatest!: HTMLButtonElement;
+let jumpLatestCount!: HTMLSpanElement;
 const composer = byId<HTMLFormElement>("composer");
+const composerDock = byId<HTMLDivElement>("composer-dock");
+const composerAgents = byId<HTMLElement>("composer-agents");
+const agentActivityLive = byId<HTMLElement>("agent-activity-live");
 const messageInput = byId<HTMLTextAreaElement>("message-input");
 const sendButton = byId<HTMLButtonElement>("send-button");
 const composerStatus = byId<HTMLSpanElement>("composer-status");
@@ -266,7 +312,6 @@ const themeToggle = byId<HTMLButtonElement>("theme-toggle");
 const sidebarToggle = byId<HTMLButtonElement>("sidebar-toggle");
 const conversationGroups = byId<HTMLDivElement>("conversation-groups");
 const newConversationButton = byId<HTMLButtonElement>("new-conversation");
-const hiddenConversationsButton = byId<HTMLButtonElement>("show-hidden-conversations");
 const conversationTocButton = byId<HTMLButtonElement>("conversation-toc");
 const conversationTocPanel = byId<HTMLElement>("conversation-toc-panel");
 const conversationTocList = byId<HTMLOListElement>("conversation-toc-list");
@@ -310,19 +355,32 @@ const workspaceShortcuts = byId<HTMLDivElement>("workspace-shortcuts");
 const workspaceEntries = byId<HTMLUListElement>("workspace-entries");
 const workspaceDialogStatus = byId<HTMLSpanElement>("workspace-dialog-status");
 const workspaceUse = byId<HTMLButtonElement>("workspace-use");
+const paneGrid = byId<HTMLDivElement>("pane-grid");
+const panesToggle = byId<HTMLButtonElement>("panes-toggle");
+const panesDialog = byId<HTMLDialogElement>("panes-dialog");
+const panesClose = byId<HTMLButtonElement>("panes-close");
+const panesLayouts = byId<HTMLDivElement>("panes-layouts");
+const panesStatus = byId<HTMLParagraphElement>("panes-status");
+const panesAssignments = byId<HTMLOListElement>("panes-assignments");
+const panesFillAgents = byId<HTMLButtonElement>("panes-fill-agents");
+const panesReset = byId<HTMLButtonElement>("panes-reset");
+const panesOpenWindow = byId<HTMLButtonElement>("panes-open-window");
 
 function targetInputs(): HTMLInputElement[] {
   return Array.from(targetPicker.querySelectorAll<HTMLInputElement>('input[name="target"]'));
 }
 
-const eventNodes = new Map<string, HTMLElement>();
-const turnNodes = new Map<string, HTMLElement>();
-const streamNodes = new Map<string, HTMLElement>();
-const toolProgressNodes = new Map<string, { node: HTMLElement; snapshot: unknown }>();
+/** Assigned by usePaneContext(); each pane owns its own node tables. */
+let eventNodes!: Map<string, HTMLElement>;
+let turnNodes!: Map<string, HTMLElement>;
+let streamNodes!: Map<string, HTMLElement>;
+let toolProgressNodes!: Map<string, { node: HTMLElement; snapshot: unknown }>;
 const deltaBuckets = new Map<string, DeltaBucket>();
 const registeredEventTypes = new Set<string>(DOCUMENTED_EVENT_TYPES);
 const retryCommandIds = new Map<string, string>();
 const closedStreamKeys = new Set<string>();
+const finishedAgents = new Map<string, FinishedAgent>();
+let composerRailSignature = "";
 
 let eventSource: EventSource | null = null;
 let reconnectTimer: number | null = null;
@@ -750,6 +808,7 @@ function showGlobalError(message: string): void {
 }
 
 const DELIVERY_ACK_STATUS = "已接受，等待 Agent 事件";
+const BUSY_SEND_STATUS = "Agent 仍在工作；本轮结束后才能发送";
 /**
  * The delivery acknowledgement is the only status that outlives its own call:
  * it waits for the first turn/message event of that submission and then clears
@@ -1095,14 +1154,11 @@ function createLatestFollower(
       onUserOperation();
     }
   });
-  scroller.addEventListener(
-    "scroll",
-    () => {
-      if (now() < ignoreScrollUntil) return;
-      if (paused && isNearBottom()) resume(false);
-    },
-    { passive: true }
-  );
+  // Deliberately no "scrolled back to the bottom -> resume" handler. With
+  // several panes, a delayed programmatic scroll event (from followIfAllowed)
+  // can arrive after the reader paused a pane and silently re-enable follow;
+  // measured on the 4-pane grid. Reading only resumes through the pane's arrow
+  // or by sending a message.
 
   return {
     isNearBottom,
@@ -1161,24 +1217,22 @@ function noteJumpLatest(countsAsNew: boolean): void {
   jumpLatest.hidden = false;
 }
 
-const roomFollow = createLatestFollower(timeline, {
-  onResume() {
-    resetJumpLatest();
-  }
-});
+/** Assigned by usePaneContext(); the primary pane owns the legacy follower. */
+let roomFollow: ReturnType<typeof createLatestFollower>;
 const assistantFollow = createLatestFollower(assistantTimeline);
 
-const conversationPanel = timeline.closest<HTMLElement>(".conversation-panel");
+const conversationPanel = document.querySelector<HTMLElement>(".conversation-panel");
 
 /**
- * Float the button just above the composer's right edge: the composer height
+ * Float the button just above the composer dock's right edge: the composer height
  * varies with the reply strip and progress card, and the column narrows when
- * the assistant drawer takes its own grid column.
+ * the assistant drawer takes its own grid column. The dock, not the card, owns
+ * the right edge now that the agent rail sits beside the composer.
  */
 function syncJumpLatestGeometry(): void {
   if (!conversationPanel) return;
   const panel = conversationPanel.getBoundingClientRect();
-  const box = composer.getBoundingClientRect();
+  const box = composerDock.getBoundingClientRect();
   if (box.height <= 0) return;
   conversationPanel.style.setProperty(
     "--jump-latest-bottom",
@@ -1192,14 +1246,9 @@ function syncJumpLatestGeometry(): void {
 
 const jumpGeometryObserver =
   typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => syncJumpLatestGeometry());
-jumpGeometryObserver?.observe(composer);
+jumpGeometryObserver?.observe(composerDock);
 window.addEventListener("resize", syncJumpLatestGeometry);
-timeline.addEventListener("scroll", syncJumpLatest, { passive: true });
 
-observeTimelineGrowth(timeline, () => {
-  if (!roomFollow.isPaused()) roomFollow.followIfAllowed();
-  syncJumpLatest();
-});
 observeTimelineGrowth(assistantTimeline, () => {
   if (!assistantFollow.isPaused()) assistantFollow.followIfAllowed();
 });
@@ -1236,7 +1285,7 @@ function trimTimelineIfNeeded(): void {
   let removed = 0;
   let node = timeline.firstElementChild;
   while (removed < target && node) {
-    if (node.id === "timeline-empty") {
+    if (node === timelineEmpty) {
       break;
     }
     const next = node.nextElementSibling;
@@ -1257,7 +1306,7 @@ function trimTimelineIfNeeded(): void {
     timeline.prepend(trimNoticeNode);
   }
   trimNoticeNode.textContent = `已收起 ${trimmedItemCount} 条较早消息`;
-  if (conversationTocOpen) renderConversationToc();
+  if (conversationTocOpen && activePane !== null && activePane === panes[0]) renderConversationToc();
 }
 
 function appendTimeline(node: HTMLLIElement, countsAsNew = true): void {
@@ -1363,6 +1412,9 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
   if (eventNodes.has(envelope.eventId)) {
     return;
   }
+  // A click handler must jump inside the pane that drew this card, not whichever
+  // pane happened to be active when the user clicked.
+  const ownerPane = activePane;
   if (isSupervisionWatchBody(envelope.body)) {
     return;
   }
@@ -1417,7 +1469,7 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
     reply.textContent = replyPreview(sourceId);
     reply.setAttribute("role", "button");
     reply.tabIndex = 0;
-    const scrollToSource = (): void => jumpToEvent(sourceId);
+    const scrollToSource = (): void => jumpToEvent(sourceId, ownerPane ?? undefined);
     reply.addEventListener("click", scrollToSource);
     reply.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
@@ -1451,12 +1503,42 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
     });
   });
   actions.append(replyButton, copyButton);
-  body.append(actions);
+
+  // A lane shows the operator's prompt as one collapsible line: six full copies
+  // of a long brief would push every Agent's answer below the fold. Room keeps
+  // the original bubble.
+  const lanePrompt =
+    activePane !== null && activePane.lens.kind === "agent" && envelope.actor.kind === "user";
+  if (lanePrompt) {
+    const meta = body.querySelector(".event-meta");
+    meta?.remove();
+    const details = document.createElement("details");
+    details.className = "lane-prompt";
+    const summary = document.createElement("summary");
+    const kicker = document.createElement("span");
+    kicker.className = "lane-prompt-kicker";
+    kicker.textContent = "你";
+    const time = document.createElement("span");
+    time.className = "lane-prompt-time";
+    time.textContent = formatTime(envelope.occurredAt);
+    const excerpt = document.createElement("span");
+    excerpt.className = "lane-prompt-excerpt";
+    const flat = messageContent(envelope.body).replace(/\s+/gu, " ").trim();
+    excerpt.textContent = flat.length > 60 ? `${flat.slice(0, 60)}…` : flat || "（空消息）";
+    summary.append(kicker, time, excerpt);
+    const wrapper = document.createElement("div");
+    wrapper.className = "lane-prompt-body";
+    wrapper.append(...Array.from(body.children), actions);
+    details.append(summary, wrapper);
+    body.append(details);
+  } else {
+    body.append(actions);
+  }
   article.append(createActorAvatar(envelope.actor), body);
 
   state.messages.set(envelope.eventId, envelope);
   eventNodes.set(envelope.eventId, article);
-  if (envelope.actor.kind === "user") {
+  if (envelope.actor.kind === "user" && activePane !== null && activePane === panes[0]) {
     conversationTocButton.hidden = false;
     if (conversationTocOpen) renderConversationToc();
   }
@@ -1641,6 +1723,7 @@ export function renderToolProgress(envelope: AIChatLinkEnvelope): void {
 
 function flushDeltaBuckets(): void {
   deltaFlushTimer = null;
+  const ready: Array<{ bucket: DeltaBucket; text: string }> = [];
   for (const bucket of deltaBuckets.values()) {
     let deltaState = state.transientText.get(bucket.key);
     if (!deltaState) {
@@ -1663,12 +1746,28 @@ function flushDeltaBuckets(): void {
     for (const piece of unindexed) {
       deltaState.text += piece.text;
     }
-    updateStreamingNode(bucket, deltaState.text);
+    ready.push({ bucket, text: deltaState.text });
   }
   deltaBuckets.clear();
+
+  // Accumulate once (one truth), then project into every pane that owns the turn.
+  for (const pane of panes) {
+    usePaneContext(pane);
+    for (const { bucket, text } of ready) {
+      if (!lensAccepts(pane.lens, bucket.envelope, bucket.targetActorId)) {
+        continue;
+      }
+      updateStreamingNode(bucket, text);
+    }
+  }
+  if (panes.length > 0) usePaneContext(panes[0]!);
 }
 
-function queueDelta(envelope: AIChatLinkEnvelope, mode: "content" | "reasoning"): void {
+function queueDelta(
+  envelope: AIChatLinkEnvelope,
+  mode: "content" | "reasoning",
+  targetActorId: string | null
+): void {
   if (!isRecord(envelope.body)) {
     renderGeneric(envelope);
     return;
@@ -1685,7 +1784,7 @@ function queueDelta(envelope: AIChatLinkEnvelope, mode: "content" | "reasoning")
   const chunkIndex = chunkIndexValue !== null && Number.isSafeInteger(chunkIndexValue) ? chunkIndexValue : null;
   let bucket = deltaBuckets.get(key);
   if (!bucket) {
-    bucket = { envelope, key, pieces: [], mode };
+    bucket = { envelope, key, pieces: [], mode, targetActorId };
     deltaBuckets.set(key, bucket);
   }
   bucket.pieces.push({ chunkIndex, text });
@@ -1732,7 +1831,62 @@ function finalizeStreamsForTurn(turnId: string, status: string): void {
   }
 }
 
-function renderTurn(turn: TurnView): void {
+/**
+ * Shared Turn bookkeeping. Runs once per envelope, before pane projection, so a
+ * Turn still enters `state.turns` when no pane happens to watch its Agent
+ * (otherwise the busy lock and the activity rail would miss it), and so the
+ * "just finished" dot can only fire once no matter how many panes paint.
+ */
+function trackTurnEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
+  const body = isRecord(envelope.body) ? envelope.body : {};
+  const turnId = readStringField(body, "turnId", "id");
+  if (!turnId) {
+    return;
+  }
+  const previous = state.turns.get(turnId);
+  const status = readStringField(body, "status") || turnStatusFromType(envelope.type);
+  // Terminal events carry no targetActorId. Keep the target learned from the
+  // queued/started events instead of falling back to the system actor that
+  // records an interrupted turn.
+  const targetActorId =
+    readStringField(body, "targetActorId", "target") ||
+    previous?.targetActorId ||
+    envelope.to.find((id) => id.startsWith("agent:")) ||
+    envelope.to[0] ||
+    envelope.actor.actorId;
+  const error = readStringField(body, "error", "errorCode", "message");
+  state.turns.set(turnId, { turnId, targetActorId, status, correlationId: envelope.correlationId, error });
+  if (
+    live &&
+    previous !== undefined &&
+    targetActorId.startsWith("agent:") &&
+    isFinishedTransition(previous.status, status)
+  ) {
+    finishedAgents.set(targetActorId, { status, turnId });
+    announceAgentActivity(targetActorId, status);
+    // The rail must reflect the finish even when no pane paints this Turn.
+    syncAgentActivity();
+  }
+  if (TERMINAL_TURN_STATUSES.has(status)) {
+    // A Turn that no pane watches must not keep accumulating delta buffers.
+    for (const key of [`turn:${turnId}`, `turn:${turnId}:reasoning`]) {
+      closedStreamKeys.add(key);
+      deltaBuckets.delete(key);
+    }
+  }
+}
+
+function renderTurn(turn: TurnView, options: RenderTurnOptions = {}): void {
+  if (options.seedOnly === true) {
+    // The POST snapshot may arrive before the user's own message does. Seed the
+    // lock into state without painting a card, so SSE still controls DOM order;
+    // the turn.queued frame creates the card right after message.created.
+    if (!state.turns.has(turn.turnId)) {
+      state.turns.set(turn.turnId, turn);
+      syncAgentActivity();
+    }
+    return;
+  }
   state.turns.set(turn.turnId, turn);
   finalizeStreamsForTurn(turn.turnId, turn.status);
   let article = turnNodes.get(turn.turnId);
@@ -1778,6 +1932,7 @@ function renderTurn(turn: TurnView): void {
   if (item) {
     appendTimeline(item);
   }
+  syncAgentActivity();
 }
 
 function renderTurnEnvelope(envelope: AIChatLinkEnvelope): void {
@@ -1787,10 +1942,26 @@ function renderTurnEnvelope(envelope: AIChatLinkEnvelope): void {
     renderGeneric(envelope);
     return;
   }
+  // trackTurnEnvelope() already wrote the resolved target/status; painting must
+  // not recompute it from the current event alone.
+  const tracked = state.turns.get(turnId);
+  if (tracked !== undefined) {
+    renderTurn(tracked);
+    return;
+  }
   const status = readStringField(body, "status") || turnStatusFromType(envelope.type);
-  const targetActorId = readStringField(body, "targetActorId", "target") || envelope.to[0] || envelope.actor.actorId;
-  const error = readStringField(body, "error", "errorCode", "message");
-  renderTurn({ turnId, targetActorId, status, correlationId: envelope.correlationId, error });
+  const targetActorId =
+    readStringField(body, "targetActorId", "target") ||
+    envelope.to.find((id) => id.startsWith("agent:")) ||
+    envelope.to[0] ||
+    envelope.actor.actorId;
+  renderTurn({
+    turnId,
+    targetActorId,
+    status,
+    correlationId: envelope.correlationId,
+    error: readStringField(body, "error", "errorCode", "message")
+  });
 }
 
 async function cancelTurn(turnId: string): Promise<void> {
@@ -2017,18 +2188,11 @@ function renderRecordActivity(envelope: AIChatLinkEnvelope, record: RecordView, 
   appendTimeline(item);
 }
 
-function addRecordFromEnvelope(envelope: AIChatLinkEnvelope, identity: boolean): void {
+/** Apply a memory record to the shared state; the timeline card is painted per pane. */
+function applyMemoryRecord(envelope: AIChatLinkEnvelope): void {
   const payload = recordEventPayload(envelope.body);
-  const record = normalizeRecord(payload, identity);
+  const record = normalizeRecord(payload, false);
   if (!record) {
-    renderGeneric(envelope);
-    return;
-  }
-  // Identity records remain a supported compatibility/API data class, but are
-  // deliberately no longer exposed in the room UI. Stable identity and
-  // per-Agent memory are configured together in /setup.
-  if (identity) {
-    renderRecordActivity(envelope, record, true);
     return;
   }
   const target = state.memories;
@@ -2036,10 +2200,7 @@ function addRecordFromEnvelope(envelope: AIChatLinkEnvelope, identity: boolean):
     target.delete(record.id);
   } else {
     if (envelope.type.endsWith(".superseded") && isRecord(payload)) {
-      const previousId = readStringField(
-        payload,
-        identity ? "supersedesIdentityId" : "supersedesMemoryId"
-      );
+      const previousId = readStringField(payload, "supersedesMemoryId");
       if (previousId) {
         target.delete(previousId);
       }
@@ -2047,7 +2208,35 @@ function addRecordFromEnvelope(envelope: AIChatLinkEnvelope, identity: boolean):
     target.set(record.id, record);
   }
   renderPublicMemoryRecords();
-  renderRecordActivity(envelope, record, false);
+}
+
+/**
+ * The Agent a turn belongs to. Terminal frames carry neither targetActorId
+ * nor an agent actor (D-044), so the durable state is consulted before the
+ * envelope sender: a lane must still see its own failure.
+ */
+function resolveTurnTarget(envelope: AIChatLinkEnvelope): string | null {
+  if (envelope.type === "message.created") {
+    return envelope.actor.actorId;
+  }
+  const turnId = turnIdFromBody(envelope.body);
+  if (turnId !== "") {
+    const body = isRecord(envelope.body) ? envelope.body : {};
+    const bodyTarget = readStringField(body, "targetActorId", "target");
+    if (bodyTarget !== "") return bodyTarget;
+    const known = state.turns.get(turnId)?.targetActorId;
+    if (known) return known;
+  }
+  const addressed = envelope.to.find((id) => id.startsWith("agent:")) ?? envelope.to[0];
+  if (addressed !== undefined && addressed !== "") return addressed;
+  return envelope.actor.kind === "agent" ? envelope.actor.actorId : null;
+}
+
+function trimPaneLog(): void {
+  const overflow = state.paneLog.length - PANE_LOG_MAX;
+  if (overflow > 0) {
+    state.paneLog.splice(0, overflow);
+  }
 }
 
 /** While a closed conversation is open, only its own ranges are rendered. */
@@ -2059,56 +2248,42 @@ function envelopeInView(envelope: AIChatLinkEnvelope): boolean {
   return view.ranges.some((range) => seq >= range.fromSeq && seq <= range.throughSeq);
 }
 
-function dispatchEnvelope(envelope: AIChatLinkEnvelope): void {
+function dispatchEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
   if (!envelopeInView(envelope)) {
     // A reset that lands while history is open still changes the sidebar.
     if (envelope.type === "context.reset") void refreshConversations();
     return;
   }
+
+  const targetActorId = resolveTurnTarget(envelope);
+
+  // 1) Global effects. These own shared state and singleton chrome (the agent
+  //    rail, the composer status, the sidebar memory list) and must run once,
+  //    no matter how many panes are watching.
   switch (envelope.type) {
-    case "message.created":
-      renderMessage(envelope);
-      if (document.hidden && envelope.actor.kind !== "user") {
-        unreadCount += 1;
-        document.title = `(${unreadCount}) ${BASE_TITLE}`;
-      }
-      return;
-    case "turn.content.delta":
-      queueDelta(envelope, "content");
-      return;
-    case "turn.reasoning.delta":
-      queueDelta(envelope, "reasoning");
-      return;
     case "context.reset": {
       const throughSeq = isRecord(envelope.body) ? readNumberField(envelope.body, "throughSeq") : null;
       if (throughSeq !== null) {
         openConversationEpoch(epochStartAfterReset(throughSeq));
       }
       void refreshConversations();
+      return;
+    }
+    case "adapter.heartbeat":
+      return;
+    case "message.created": {
+      state.messages.set(envelope.eventId, envelope);
+      if (document.hidden && envelope.actor.kind !== "user") {
+        unreadCount += 1;
+        document.title = `(${unreadCount}) ${BASE_TITLE}`;
+      }
       break;
     }
-    case "turn.reasoning.recorded":
-      renderReasoningRecord(envelope);
-      return;
-    case "tool.progress":
-    case "tool.progress.recorded":
-      renderToolProgress(envelope);
-      return;
     case "context.compaction.started":
     case "context.compaction.retrying":
     case "context.compaction.completed":
     case "context.compaction.failed":
       renderRuntimeProgress(envelope);
-      return;
-    case "turn.queued":
-    case "turn.dispatched":
-    case "turn.started":
-    case "turn.streaming":
-    case "turn.completed":
-    case "turn.failed":
-    case "turn.cancelled":
-    case "turn.interrupted":
-      renderTurnEnvelope(envelope);
       return;
     case "session.starting":
     case "session.retrying":
@@ -2122,15 +2297,107 @@ function dispatchEnvelope(envelope: AIChatLinkEnvelope): void {
     case "memory.remembered":
     case "memory.superseded":
     case "memory.retracted":
-      addRecordFromEnvelope(envelope, false);
+      applyMemoryRecord(envelope);
+      break;
+    default:
+      break;
+  }
+
+  // 2) Turn lifecycle is shared state, not a pane effect: track it even when no
+  //    pane watches this Agent, then let each pane paint what it accepts.
+  if (
+    envelope.type === "turn.queued" ||
+    envelope.type === "turn.dispatched" ||
+    envelope.type === "turn.started" ||
+    envelope.type === "turn.streaming" ||
+    envelope.type === "turn.completed" ||
+    envelope.type === "turn.failed" ||
+    envelope.type === "turn.cancelled" ||
+    envelope.type === "turn.interrupted"
+  ) {
+    trackTurnEnvelope(envelope, live);
+  }
+
+  // 3) Deltas accumulate once here; flushDeltaBuckets() projects the shared text
+  //    into every pane whose lane owns the turn. Queueing per pane would append
+  //    the same chunk N times.
+  if (envelope.type === "turn.content.delta" || envelope.type === "turn.reasoning.delta") {
+    if (isRecord(envelope.body)) {
+      queueDelta(
+        envelope,
+        envelope.type === "turn.content.delta" ? "content" : "reasoning",
+        targetActorId
+      );
       return;
+    }
+  }
+
+  // 4) Bounded replay log: lets a pane created mid-conversation (or re-lensed)
+  //    repaint in the same order the room timeline saw. Deltas are excluded.
+  if (!envelope.type.endsWith(".delta")) {
+    const singletonOnly =
+      envelope.type.startsWith("session.") ||
+      envelope.type.startsWith("context.compaction.") ||
+      envelope.type === "adapter.heartbeat";
+    if (!singletonOnly) {
+      state.paneLog.push({ envelope, targetActorId });
+      trimPaneLog();
+    }
+  }
+
+  // 5) Per-pane projection. Room panes take everything; agent panes take the
+  //    operator's prompts and the turn/delta/tool records of their own Agent.
+  for (const pane of panes) {
+    if (!lensAccepts(pane.lens, envelope, targetActorId)) {
+      continue;
+    }
+    usePaneContext(pane);
+    paintEnvelope(envelope);
+  }
+  if (panes.length > 0) {
+    usePaneContext(panes[0]!);
+  }
+}
+
+/** Paint one envelope into the pane selected by usePaneContext(). */
+function paintEnvelope(envelope: AIChatLinkEnvelope): void {
+  switch (envelope.type) {
+    case "message.created":
+      renderMessage(envelope);
+      return;
+    case "turn.reasoning.recorded":
+      renderReasoningRecord(envelope);
+      return;
+    case "tool.progress":
+    case "tool.progress.recorded":
+      renderToolProgress(envelope);
+      return;
+    case "turn.queued":
+    case "turn.dispatched":
+    case "turn.started":
+    case "turn.streaming":
+    case "turn.completed":
+    case "turn.failed":
+    case "turn.cancelled":
+    case "turn.interrupted":
+      renderTurnEnvelope(envelope);
+      return;
+    case "memory.remembered":
+    case "memory.superseded":
+    case "memory.retracted": {
+      const record = normalizeRecord(recordEventPayload(envelope.body), false);
+      if (record) renderRecordActivity(envelope, record, false);
+      else renderGeneric(envelope);
+      return;
+    }
     case "identity.remembered":
     case "identity.superseded":
-    case "identity.retracted":
-      addRecordFromEnvelope(envelope, true);
+    case "identity.retracted": {
+      const record = normalizeRecord(recordEventPayload(envelope.body), true);
+      if (record) renderRecordActivity(envelope, record, true);
+      else renderGeneric(envelope);
       return;
-    case "adapter.heartbeat":
-      return;
+    }
     case "supervision.paired":
     case "supervision.observed":
     case "supervision.steered":
@@ -2196,7 +2463,7 @@ function acceptEnvelope(
   if (source === "live" && deliveryAcknowledgementPending && answersDeliveryAcknowledgement(envelope)) {
     setComposerStatus("");
   }
-  dispatchEnvelope(envelope);
+  dispatchEnvelope(envelope, source === "live");
   if (envelope.type === "message.created" || envelope.type === "context.compaction.completed") {
     scheduleContextUsageRefresh();
   }
@@ -2221,6 +2488,8 @@ interface ConversationSummary {
   endSeq: number | null;
   startedAt: string;
   active: boolean;
+  /** The open epoch has no room-context message yet; the sidebar keeps it out. */
+  empty: boolean;
   /** Closed conversation this epoch was resumed from; its range is the seed. */
   resumedFrom: ResumedConversationRef | null;
 }
@@ -2406,33 +2675,10 @@ function scheduleWorkspacePoll(): void {
 }
 
 let conversations: ConversationSummary[] = [];
-let hiddenConversationIds = readHiddenConversationIds();
 let collapsedWorkspaceIds = readCollapsedWorkspaceIds();
-let showHiddenConversations = false;
 let conversationView: ConversationView | null = null;
 let conversationViewToken = 0;
 let conversationTocOpen = false;
-
-function readHiddenConversationIds(): Set<string> {
-  try {
-    const raw = localStorage.getItem(HIDDEN_CONVERSATIONS_KEY);
-    if (!raw) return new Set();
-    const parsed: unknown = JSON.parse(raw);
-    return new Set(
-      Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []
-    );
-  } catch {
-    return new Set();
-  }
-}
-
-function persistHiddenConversationIds(): void {
-  try {
-    localStorage.setItem(HIDDEN_CONVERSATIONS_KEY, JSON.stringify([...hiddenConversationIds]));
-  } catch {
-    // Presentation-only preference; losing it is harmless.
-  }
-}
 
 function readCollapsedWorkspaceIds(): Set<string> {
   try {
@@ -2501,6 +2747,7 @@ function normalizeConversation(value: unknown): ConversationSummary | null {
     endSeq,
     startedAt,
     active,
+    empty: value.empty === true,
     resumedFrom: normalizeResumedConversation(value.resumedFrom)
   };
 }
@@ -2669,24 +2916,39 @@ function clearTimelineView(): void {
   }
   deltaBuckets.clear();
   closedStreamKeys.clear();
-  for (const node of Array.from(timeline.children)) {
-    if (node !== timelineEmpty) {
-      cleanupRemovedItem(node);
+  // Every pane is a projection of the same epoch: a reset empties all of them.
+  for (const pane of panes) {
+    usePaneContext(pane);
+    for (const node of Array.from(timeline.children)) {
+      if (node !== timelineEmpty) {
+        cleanupRemovedItem(node);
+        node.remove();
+      }
     }
+    timeline.replaceChildren(timelineEmpty);
+    timelineEmpty.hidden = false;
+    eventNodes.clear();
+    turnNodes.clear();
+    streamNodes.clear();
+    toolProgressNodes.clear();
+    lastTimelineDate = "";
+    trimmedItemCount = 0;
+    trimNoticeNode = null;
+    pane.lastDate = "";
+    pane.trimCount = 0;
+    pane.trimNotice = null;
+    pane.pendingNew = 0;
+    resetJumpLatest();
   }
-  timeline.replaceChildren(timelineEmpty);
-  timelineEmpty.hidden = false;
-  eventNodes.clear();
-  turnNodes.clear();
-  streamNodes.clear();
-  toolProgressNodes.clear();
+  if (panes.length > 0) {
+    usePaneContext(panes[0]!);
+  }
   state.messages.clear();
   state.turns.clear();
   state.transientText.clear();
-  lastTimelineDate = "";
-  trimmedItemCount = 0;
-  trimNoticeNode = null;
-  resetJumpLatest();
+  state.paneLog = [];
+  finishedAgents.clear();
+  syncAgentActivity();
   conversationTocButton.hidden = true;
   setConversationTocOpen(false);
   unreadCount = 0;
@@ -2695,31 +2957,6 @@ function clearTimelineView(): void {
     clearReply();
   }
   refreshEmptyStateCopy();
-}
-
-function conversationHiddenKey(workspaceId: string, conversationId: string): string {
-  return `${workspaceId}::${conversationId}`;
-}
-
-function isConversationHidden(workspaceId: string, conversation: ConversationSummary): boolean {
-  return (
-    hiddenConversationIds.has(conversationHiddenKey(workspaceId, conversation.conversationId)) ||
-    // Legacy keys were global; read them as the primary workspace's entries.
-    (workspaceId === primaryWorkspaceId && hiddenConversationIds.has(conversation.conversationId))
-  );
-}
-
-function setConversationHidden(workspaceId: string, conversation: ConversationSummary, hidden: boolean): void {
-  const key = conversationHiddenKey(workspaceId, conversation.conversationId);
-  if (hidden) {
-    hiddenConversationIds.add(key);
-    if (workspaceId === primaryWorkspaceId) hiddenConversationIds.delete(conversation.conversationId);
-  } else {
-    hiddenConversationIds.delete(key);
-    hiddenConversationIds.delete(conversation.conversationId);
-  }
-  persistHiddenConversationIds();
-  renderConversations();
 }
 
 function workspaceGroupItems(workspace: WorkspaceView | null): ConversationSummary[] {
@@ -2733,27 +2970,11 @@ function renderConversations(): void {
   conversationGroups.replaceChildren();
   if (workspaces.length === 0) {
     renderConversationGroup(null, conversations);
-  } else {
-    for (const workspace of workspaces) {
-      renderConversationGroup(workspace, workspaceGroupItems(workspace));
-    }
+    return;
   }
-  let hiddenCount = 0;
-  if (workspaces.length === 0) {
-    for (const conversation of conversations) {
-      if (isConversationHidden(primaryWorkspaceId, conversation)) hiddenCount += 1;
-    }
-  } else {
-    for (const workspace of workspaces) {
-      for (const conversation of workspaceGroupItems(workspace)) {
-        if (isConversationHidden(workspace.workspaceId, conversation)) hiddenCount += 1;
-      }
-    }
+  for (const workspace of workspaces) {
+    renderConversationGroup(workspace, workspaceGroupItems(workspace));
   }
-  hiddenConversationsButton.hidden = hiddenCount === 0;
-  hiddenConversationsButton.textContent = showHiddenConversations
-    ? "收起已隐藏"
-    : `显示已隐藏 (${hiddenCount})`;
 }
 
 /* ------------------------------------------------- workspace group controls */
@@ -2941,7 +3162,13 @@ function renderConversationGroup(
     pathLabel.textContent = shortenWorkspacePath(workspace.path);
     const count = document.createElement("span");
     count.className = "workspace-group-count";
-    count.textContent = String(items.length);
+    // Only what the group actually shows: a directory whose conversations were
+    // all deleted must not keep advertising the old total. Empty means no number.
+    if (items.length === 0) {
+      count.hidden = true;
+    } else {
+      count.textContent = String(items.length);
+    }
     switchButton.append(dot, label, pathLabel, count);
     switchButton.addEventListener("click", () => {
       if (workspace.workspaceId !== activeWorkspaceId) {
@@ -2997,8 +3224,10 @@ function renderConversationGroup(
   list.className = "conversation-list";
   list.setAttribute("aria-label", workspace === null ? "对话列表" : `${workspace.label} 的对话`);
   if (workspace !== null) list.id = `workspace-conversations-${workspace.workspaceId}`;
+  // Every epoch the broker returns is shown, including the open one that has no
+  // message yet: it is the conversation the next send lands in, and it carries
+  // the `对话 N` number. Closed boundary artifacts never reach the client.
   for (const conversation of items) {
-    if (!showHiddenConversations && isConversationHidden(workspaceId, conversation)) continue;
     list.append(createConversationItem(workspaceId, conversation));
   }
   if (items.length === 0) {
@@ -3011,12 +3240,66 @@ function renderConversationGroup(
   conversationGroups.append(group);
 }
 
+/**
+ * The conversation the main timeline is showing right now. A replayed history
+ * replaces the live epoch on screen, so selection has to follow
+ * `conversationView`; keying it off `conversation.active` alone left the accent
+ * parked on the first row whichever conversation was actually opened.
+ */
+function onScreenConversationId(): string | null {
+  return conversationView?.conversation.conversationId ?? null;
+}
+
+/**
+ * The directory the main timeline belongs to. The pre-hub fallback never fills
+ * `activeWorkspaceId`, so an empty value means the primary one.
+ */
+function onScreenWorkspaceId(): string {
+  return activeWorkspaceId.length === 0 ? primaryWorkspaceId : activeWorkspaceId;
+}
+
+// Conversation ids are only unique inside one directory (both the primary and an
+// added directory can hold `conv:1`), so the workspace is part of the key.
+function isConversationOnScreen(workspaceId: string, conversation: ConversationSummary): boolean {
+  if (workspaceId !== onScreenWorkspaceId()) return false;
+  const viewedId = onScreenConversationId();
+  if (viewedId !== null) return viewedId === conversation.conversationId;
+  // No replay open: the active directory's live epoch is what the timeline holds.
+  // Every directory has its own live epoch, so `active` alone would light one row
+  // in every group.
+  return conversation.active;
+}
+
+/**
+ * Move the selection without rebuilding the list: replay / resume / exit change
+ * which conversation is on screen far more often than which ones exist. With no
+ * replay open the live epoch is the one on screen, and `is-active` (written from
+ * `conversation.active` at render time) already marks it.
+ */
+function syncConversationSelection(): void {
+  const viewedId = onScreenConversationId();
+  for (const item of conversationGroups.querySelectorAll<HTMLElement>(".conversation-item")) {
+    const onScreen =
+      viewedId === null
+        ? item.dataset.workspaceId === onScreenWorkspaceId() && item.classList.contains("is-active")
+        : item.dataset.workspaceId === onScreenWorkspaceId() &&
+          item.dataset.conversationId === viewedId;
+    item.classList.toggle("is-viewing", onScreen);
+    const open = item.querySelector<HTMLButtonElement>(".conversation-open");
+    if (open === null) continue;
+    if (onScreen) open.setAttribute("aria-current", "true");
+    else open.removeAttribute("aria-current");
+  }
+}
+
 function createConversationItem(workspaceId: string, conversation: ConversationSummary): HTMLLIElement {
   const item = document.createElement("li");
   item.className = "conversation-item";
   item.dataset.conversationId = conversation.conversationId;
+  item.dataset.workspaceId = workspaceId;
   if (conversation.active) item.classList.add("is-active");
-  if (isConversationHidden(workspaceId, conversation)) item.classList.add("is-hidden-conversation");
+  const onScreen = isConversationOnScreen(workspaceId, conversation);
+  if (onScreen) item.classList.add("is-viewing");
 
   const open = document.createElement("button");
   open.type = "button";
@@ -3027,6 +3310,7 @@ function createConversationItem(workspaceId: string, conversation: ConversationS
     (conversation.resumedFrom
       ? ` · 续自 seq ${conversation.resumedFrom.fromSeq}–${conversation.resumedFrom.throughSeq}`
       : "");
+  if (onScreen) open.setAttribute("aria-current", "true");
   const title = document.createElement("span");
   title.className = "conversation-title";
   title.textContent = conversation.title;
@@ -3053,19 +3337,71 @@ function createConversationItem(workspaceId: string, conversation: ConversationS
     void enterConversationView(conversation);
   });
 
-  const hide = document.createElement("button");
-  hide.type = "button";
-  hide.className = "conversation-hide";
-  const hidden = isConversationHidden(workspaceId, conversation);
-  hide.title = hidden ? "恢复显示" : "从列表隐藏（记录仍保留）";
-  hide.setAttribute("aria-label", hide.title);
-  hide.textContent = hidden ? "↺" : "×";
-  hide.addEventListener("click", () => {
-    setConversationHidden(workspaceId, conversation, !hidden);
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "conversation-delete";
+  remove.append(removeGlyph());
+  remove.title = "删除这条对话（永久）";
+  remove.setAttribute("aria-label", `删除对话 ${conversation.title}`);
+  remove.addEventListener("click", () => {
+    void deleteConversation(workspaceId, conversation, remove);
   });
 
-  item.append(open, hide);
+  item.append(open, remove);
   return item;
+}
+
+/**
+ * Deleting a conversation removes it from the local database: the confirmation
+ * is explicit about that, and the sidebar only drops the row after the server
+ * acknowledged the purge.
+ */
+async function deleteConversation(
+  workspaceId: string,
+  conversation: ConversationSummary,
+  trigger: HTMLButtonElement
+): Promise<void> {
+  const scope = workspaceId === onScreenWorkspaceId() ? "" : "（另一个工作目录）";
+  const confirmed = window.confirm(
+    `删除对话「${conversation.title}」${scope}？\n\n` +
+      "该对话的消息、回合与工具记录会从本地数据库永久删除，不能恢复；" +
+      "Agent 已记录的记忆不会被删除。"
+  );
+  if (!confirmed) return;
+  trigger.disabled = true;
+  trigger.title = "正在删除…";
+  try {
+    await requestJson<unknown>(withWorkspace("/api/conversations/delete", workspaceId), {
+      method: "POST",
+      workspace: false,
+      body: JSON.stringify({
+        clientCommandId: makeClientCommandId("delete-conversation"),
+        conversationId: conversation.conversationId,
+        resetNativeSessions: true
+      })
+    });
+    if (conversationView?.conversation.conversationId === conversation.conversationId) {
+      // The replay on screen is gone; a reload rebuilds every range and token.
+      exitConversationView();
+      return;
+    }
+    await refreshConversations(workspaceId);
+    if (
+      conversation.active &&
+      conversationView === null &&
+      workspaceId === onScreenWorkspaceId()
+    ) {
+      // The server closed the open epoch; follow the fresh one so the live
+      // timeline cannot keep showing the conversation that was just deleted. A
+      // replayed history on screen stays where it is until the operator leaves.
+      const active = conversations.find((candidate) => candidate.active);
+      if (active !== undefined) openConversationEpoch(active.startSeq);
+    }
+  } catch (error) {
+    showGlobalError(errorMessage(error));
+    trigger.disabled = false;
+    trigger.title = "删除这条对话（永久）";
+  }
 }
 
 async function restartWorkspace(workspaceId: string): Promise<void> {
@@ -3338,12 +3674,32 @@ async function startNewConversation(target?: WorkspaceView): Promise<void> {
       navigateToWorkspace(workspaceId);
       return;
     }
+    // A new epoch is live, not a replay: a reload must not re-open `?conv=`.
+    syncViewedConversationParam(null);
     window.location.reload();
   } catch (error) {
     showGlobalError(errorMessage(error));
   } finally {
     newConversationButton.disabled = false;
   }
+}
+
+/**
+ * `?conv=` must match the replay on screen: a reload has to land on it, and
+ * leaving has to drop it — otherwise the resumed page re-opens the history view
+ * the operator just left.
+ */
+function syncViewedConversationParam(conversationId: string | null): void {
+  const url = new URL(window.location.href);
+  const current = url.searchParams.get("conv");
+  if (conversationId === null) {
+    if (current === null) return;
+    url.searchParams.delete("conv");
+  } else {
+    if (current === conversationId) return;
+    url.searchParams.set("conv", conversationId);
+  }
+  window.history.replaceState(null, "", url);
 }
 
 /**
@@ -3355,6 +3711,8 @@ async function enterConversationView(conversation: ConversationSummary): Promise
   conversationViewToken += 1;
   const token = conversationViewToken;
   conversationView = { conversation, ranges: conversationRanges(conversation) };
+  syncViewedConversationParam(conversation.conversationId);
+  syncConversationSelection();
   clearTimelineView();
   syncViewingBanner();
   messageInput.focus();
@@ -3373,8 +3731,10 @@ async function enterConversationView(conversation: ConversationSummary): Promise
   if (conversationView === null) return;
   appendConversationBoundary(`以上为「${conversation.title}」的历史记录`);
   refreshEmptyStateCopy();
-  roomFollow.resume(false);
-  roomFollow.scrollToLatest(false);
+  for (const pane of panes) {
+    pane.follow.resume(false);
+    pane.follow.scrollToLatest(false);
+  }
   syncConversationToc();
 }
 
@@ -3445,6 +3805,8 @@ function exitConversationView(): void {
   if (conversationView === null) return;
   conversationView = null;
   conversationViewToken += 1;
+  syncViewedConversationParam(null);
+  syncConversationSelection();
   viewingBanner.hidden = true;
   window.location.reload();
 }
@@ -3464,8 +3826,9 @@ function userPromptEntries(): Array<{ eventId: string; content: string }> {
   for (const envelope of state.messages.values()) {
     if (envelope.actor.kind !== "user") continue;
     // A collapsed (trimmed) bubble has no node left to jump to, so it is not an
-    // index entry: every number in the panel must land somewhere.
-    if (!eventNodes.has(envelope.eventId)) continue;
+    // index entry: every number in the panel must land somewhere. The index is a
+    // reading tool for the primary pane, never a lane.
+    if (!panes[0]?.eventNodes.has(envelope.eventId)) continue;
     const content = messageContent(envelope.body).replace(/\s+/gu, " ").trim();
     if (content.length === 0) continue;
     entries.push({ eventId: envelope.eventId, content });
@@ -3520,18 +3883,67 @@ function syncConversationToc(): void {
   if (conversationTocOpen) renderConversationToc();
 }
 
-function jumpToEvent(eventId: string): void {
-  const target = eventNodes.get(eventId);
+function jumpToNode(target: HTMLElement, pane: PaneContext = panes[0]!): void {
+  pane.follow.pause();
+  pane.follow.markProgrammatic();
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("is-highlighted");
+  window.setTimeout(() => target.classList.remove("is-highlighted"), 1_400);
+}
+
+function jumpToEvent(eventId: string, pane: PaneContext = panes[0]!): void {
+  const target = pane?.eventNodes.get(eventId);
   if (!target) {
     // The bubble was collapsed between painting the panel and the click.
     renderConversationToc();
     return;
   }
-  roomFollow.pause();
-  roomFollow.markProgrammatic();
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
-  target.classList.add("is-highlighted");
-  window.setTimeout(() => target.classList.remove("is-highlighted"), 1_400);
+  jumpToNode(target, pane);
+}
+
+/** The agent rail only ever jumps to a message that still has a node. */
+function latestVisibleMessageEventId(
+  actorId: string,
+  pane: PaneContext = panes[0]!
+): string | null {
+  let latest: string | null = null;
+  for (const envelope of state.messages.values()) {
+    if (envelope.type !== "message.created" || envelope.actor.actorId !== actorId) continue;
+    if (pane.eventNodes.has(envelope.eventId)) latest = envelope.eventId;
+  }
+  return latest;
+}
+
+/** Prefer the lane that already watches this Agent; fall back to the room. */
+function paneForAgent(actorId: string): PaneContext {
+  return (
+    panes.find((pane) => pane.lens.kind === "agent" && pane.lens.actorId === actorId) ?? panes[0]!
+  );
+}
+
+/**
+ * Clicking an agent answers "show me what just happened". A completed Turn ends
+ * in its new reply; an abnormal ending has no reply, so it targets the turn card
+ * itself (the rail's title already says why).
+ */
+function jumpToAgentLatest(actorId: string): void {
+  const agent = state.agents.get(actorId);
+  if (!agent) return;
+  const finished = finishedAgents.get(actorId);
+  finishedAgents.delete(actorId);
+  syncAgentActivity();
+  const pane = paneForAgent(actorId);
+  const turnCard = finished === undefined ? undefined : pane.turnNodes.get(finished.turnId);
+  if (finished !== undefined && finished.status !== "completed" && turnCard !== undefined) {
+    jumpToNode(turnCard, pane);
+    return;
+  }
+  const eventId = latestVisibleMessageEventId(actorId, pane);
+  if (eventId !== null) {
+    jumpToEvent(eventId, pane);
+    return;
+  }
+  setComposerStatus(`「${agent.displayName}」在本对话还没有可见回复`);
 }
 
 function renderTargetChips(): void {
@@ -3584,10 +3996,7 @@ function renderAgents(): void {
 
     const avatar = document.createElement("span");
     avatar.className = "roster-avatar";
-    const displayName = agent.displayName.trim();
-    avatar.textContent = /^[\x00-]/u.test(displayName)
-      ? displayName.slice(0, 2).toUpperCase()
-      : displayName.slice(0, 1);
+    avatar.textContent = agentMonogram(agent.displayName);
     avatar.setAttribute("aria-hidden", "true");
 
     const name = document.createElement("span");
@@ -3632,6 +4041,569 @@ function renderAgents(): void {
   agentCount.textContent = `${available} / ${ordered.length}`;
   agentCount.title = `${available} 个可用 / 共 ${ordered.length} 个 Agent`;
   renderTargetChips();
+  renderComposerAgents();
+  reconcilePanesWithRoster();
+}
+
+function agentMonogram(displayName: string): string {
+  const name = displayName.trim();
+  if (name.length === 0) return "?";
+  return /^[\x00-\x7f]/u.test(name) ? name.slice(0, 2).toUpperCase() : name.slice(0, 1);
+}
+
+/* ------------------------------------------------------------------ panes */
+/*
+ * One inserted pane = one view of the same live state. `panes[0]` is the static
+ * #timeline element (so the single-pane baseline keeps its ids and geometry);
+ * every other pane is created by pane-view.ts. Rendering functions read the
+ * module-level aliases below; usePaneContext() points them at one pane at a time.
+ */
+
+interface PaneContext {
+  id: string;
+  lens: PaneLens;
+  shell: PaneShell;
+  primary: boolean;
+  timeline: HTMLOListElement;
+  empty: HTMLLIElement;
+  follow: ReturnType<typeof createLatestFollower>;
+  eventNodes: Map<string, HTMLElement>;
+  turnNodes: Map<string, HTMLElement>;
+  streamNodes: Map<string, HTMLElement>;
+  toolProgressNodes: Map<string, { node: HTMLElement; snapshot: unknown }>;
+  trimCount: number;
+  trimNotice: HTMLLIElement | null;
+  lastDate: string;
+  pendingNew: number;
+}
+
+let panes: PaneContext[] = [];
+let activePane: PaneContext | null = null;
+/** Layout is only reconciled with the roster once bootstrap has loaded it. */
+let paneRosterReady = false;
+
+function isSingleRoomMode(): boolean {
+  return panes.length === 1 && panes[0]!.lens.kind === "room";
+}
+
+function paneJumpControl(pane: PaneContext): {
+  button: HTMLButtonElement;
+  count: HTMLSpanElement;
+} {
+  if (pane.primary && isSingleRoomMode()) {
+    return { button: legacyJumpLatest, count: legacyJumpLatestCount };
+  }
+  return { button: pane.shell.jump, count: pane.shell.jumpCount };
+}
+
+/** Project this pane's follow state onto whichever control is currently visible. */
+function renderPaneJumpState(pane: PaneContext): void {
+  const nearBottom = pane.follow.isNearBottom();
+  if (nearBottom) {
+    pane.pendingNew = 0;
+  }
+  if (activePane === pane) {
+    newWhileScrolledUp = pane.pendingNew;
+  }
+  const control = paneJumpControl(pane);
+  control.button.hidden = nearBottom;
+  control.count.hidden = pane.pendingNew === 0;
+  control.count.textContent = pane.pendingNew > 99 ? "99+" : String(pane.pendingNew);
+  const label =
+    pane.pendingNew > 0 ? `回到最新进度 · ${pane.pendingNew} 条新消息` : "回到最新进度";
+  control.button.title = label;
+  control.button.setAttribute("aria-label", label);
+}
+
+/**
+ * Point every pane-scoped alias at one pane. Save the outgoing pane's scalar
+ * state first: the render functions below were written against a single
+ * timeline and must not need a rewrite just to become per-pane.
+ */
+function usePaneContext(pane: PaneContext): void {
+  if (activePane === pane) {
+    return;
+  }
+  if (activePane !== null) {
+    activePane.trimCount = trimmedItemCount;
+    activePane.trimNotice = trimNoticeNode;
+    activePane.lastDate = lastTimelineDate;
+    activePane.pendingNew = newWhileScrolledUp;
+  }
+  activePane = pane;
+  timeline = pane.timeline;
+  timelineEmpty = pane.empty;
+  eventNodes = pane.eventNodes;
+  turnNodes = pane.turnNodes;
+  streamNodes = pane.streamNodes;
+  toolProgressNodes = pane.toolProgressNodes;
+  roomFollow = pane.follow;
+  trimmedItemCount = pane.trimCount;
+  trimNoticeNode = pane.trimNotice;
+  lastTimelineDate = pane.lastDate;
+  newWhileScrolledUp = pane.pendingNew;
+  const jump = paneJumpControl(pane);
+  jumpLatest = jump.button;
+  jumpLatestCount = jump.count;
+  renderPaneJumpState(pane);
+}
+
+function makePaneContext(shell: PaneShell, lens: PaneLens, primary: boolean): PaneContext {
+  const pane: PaneContext = {
+    id: shell.section.dataset.paneId ?? "pane",
+    lens,
+    shell,
+    primary,
+    timeline: shell.timeline,
+    empty: shell.empty,
+    follow: createLatestFollower(shell.timeline, {
+      onResume() {
+        pane.pendingNew = 0;
+        renderPaneJumpState(pane);
+      }
+    }),
+    eventNodes: new Map(),
+    turnNodes: new Map(),
+    streamNodes: new Map(),
+    toolProgressNodes: new Map(),
+    trimCount: 0,
+    trimNotice: null,
+    lastDate: "",
+    pendingNew: 0
+  };
+  shell.select.addEventListener("change", () => {
+    const index = panes.indexOf(pane);
+    if (index < 0) return;
+    const lenses = panes.map((item) => item.lens);
+    lenses[index] = parsePaneLens(shell.select.value) ?? roomLens();
+    applyPanes(lenses);
+  });
+  shell.close.addEventListener("click", () => {
+    const index = panes.indexOf(pane);
+    if (index >= 0) removePaneAt(index);
+  });
+  shell.jump.addEventListener("click", () => pane.follow.resume());
+  shell.timeline.addEventListener("scroll", () => renderPaneJumpState(pane), { passive: true });
+  observeTimelineGrowth(shell.timeline, () => {
+    if (!pane.follow.isPaused()) pane.follow.followIfAllowed();
+    renderPaneJumpState(pane);
+  });
+  return pane;
+}
+
+function paneLensLabel(lens: PaneLens): string {
+  if (lens.kind === "room") {
+    return "房间（全部）";
+  }
+  const agent = state.agents.get(lens.actorId);
+  return agent?.displayName ?? lens.actorId.replace(/^agent:/u, "");
+}
+
+/** Head chrome + picker options for every pane. */
+function syncPaneHeaders(): void {
+  if (panes.length === 0) {
+    return;
+  }
+  const agents = orderedAgents();
+  const working = new Set(activeTurnActorIds(state.turns.values()));
+  panes.forEach((pane, index) => {
+    const shell = pane.shell;
+    const value = formatPaneLens(pane.lens);
+    fillPaneLensOptions(shell.select, agents, value);
+    shell.select.value = value;
+    shell.section.setAttribute("aria-label", `窗格 ${index + 1}：${paneLensLabel(pane.lens)}`);
+    if (pane.lens.kind === "agent") {
+      const agent = state.agents.get(pane.lens.actorId);
+      shell.avatar.textContent = agent ? agentMonogram(agent.displayName) : "?";
+      shell.avatar.className = `pane-avatar ${agent ? actorToneClass(agent.actorId) : ""}`;
+      shell.state.hidden = false;
+      const statusValue =
+        agent === undefined
+          ? "missing"
+          : !agent.enabled
+            ? "disabled"
+            : working.has(agent.actorId)
+              ? "working"
+              : agent.status;
+      shell.state.dataset.state = statusValue;
+      const statusText =
+        agent === undefined
+          ? "不在名册"
+          : !agent.enabled
+            ? "已停用"
+            : working.has(agent.actorId)
+              ? "正在工作"
+              : humanStatus(agent.status);
+      shell.state.title = `${paneLensLabel(pane.lens)} · ${statusText}`;
+    } else {
+      shell.avatar.textContent = "房";
+      shell.avatar.className = "pane-avatar";
+      shell.state.hidden = true;
+      shell.state.dataset.state = "room";
+    }
+  });
+}
+
+/** A removed Agent must not leave a dead lane behind; a disabled one may stay. */
+function reconcilePanesWithRoster(): void {
+  if (!paneRosterReady || panes.length === 0) {
+    return;
+  }
+  const lenses = panes.map((pane) =>
+    pane.lens.kind === "agent" && !state.agents.has(pane.lens.actorId) ? roomLens() : pane.lens
+  );
+  const changed = lenses.some(
+    (lens, index) => formatPaneLens(lens) !== formatPaneLens(panes[index]!.lens)
+  );
+  if (changed) {
+    applyPanes(lenses);
+  } else {
+    syncPaneHeaders();
+  }
+}
+
+function readStoredPanes(): PaneLens[] {
+  try {
+    const raw = localStorage.getItem(PANES_STORAGE_KEY);
+    if (raw === null) {
+      return defaultPanes().lenses;
+    }
+    return normalizePanes(JSON.parse(raw) as unknown).lenses;
+  } catch {
+    return defaultPanes().lenses;
+  }
+}
+
+function persistPanes(): void {
+  try {
+    localStorage.setItem(
+      PANES_STORAGE_KEY,
+      JSON.stringify({
+        count: panes.length,
+        lenses: panes.map((pane) => formatPaneLens(pane.lens))
+      })
+    );
+  } catch {
+    // localStorage may be unavailable; the layout still works for this session.
+  }
+}
+
+function layoutPanes(): void {
+  const spans = paneSpans(panes.length);
+  paneGrid.style.gridTemplateColumns = `repeat(${PANE_TRACKS}, minmax(0, 1fr))`;
+  panes.forEach((pane, index) => {
+    pane.shell.section.style.gridColumn = `span ${spans[index] ?? PANE_TRACKS}`;
+  });
+}
+
+function syncPaneChrome(): void {
+  document.documentElement.dataset.panes = isSingleRoomMode() ? "single-room" : "grid";
+  paneGrid.dataset.count = String(Math.max(1, panes.length));
+  layoutPanes();
+  for (const pane of panes) {
+    pane.shell.close.hidden = panes.length <= 1;
+    pane.shell.close.setAttribute("aria-label", `关闭窗格 ${paneLensLabel(pane.lens)}`);
+    renderPaneJumpState(pane);
+  }
+  syncJumpLatestGeometry();
+}
+
+function clearPaneDom(pane: PaneContext): void {
+  usePaneContext(pane);
+  for (const node of Array.from(pane.timeline.children)) {
+    if (node === pane.empty) {
+      continue;
+    }
+    cleanupRemovedItem(node);
+    node.remove();
+  }
+  if (!pane.empty.isConnected) {
+    pane.timeline.append(pane.empty);
+  }
+  pane.empty.hidden = false;
+  pane.eventNodes.clear();
+  pane.turnNodes.clear();
+  pane.streamNodes.clear();
+  pane.toolProgressNodes.clear();
+  trimmedItemCount = 0;
+  trimNoticeNode = null;
+  lastTimelineDate = "";
+  newWhileScrolledUp = 0;
+  pane.trimCount = 0;
+  pane.trimNotice = null;
+  pane.lastDate = "";
+  pane.pendingNew = 0;
+  renderPaneJumpState(pane);
+}
+
+/** Rebuild one pane from the bounded log, in the order the room saw it. */
+function repaintPane(pane: PaneContext): void {
+  clearPaneDom(pane);
+  usePaneContext(pane);
+  for (const entry of state.paneLog) {
+    if (!lensAccepts(pane.lens, entry.envelope, entry.targetActorId)) {
+      continue;
+    }
+    paintEnvelope(entry.envelope);
+  }
+  refreshPaneEmptyCopy(pane);
+  if (panes.length > 0) {
+    usePaneContext(panes[0]!);
+  }
+  pane.follow.resume(true);
+}
+
+function applyPanes(nextLenses: PaneLens[]): void {
+  const lenses = nextLenses.slice(0, MAX_PANES);
+  if (lenses.length === 0) {
+    lenses.push(roomLens());
+  }
+
+  const created = new Set<PaneContext>();
+  while (panes.length < lenses.length) {
+    const shell = createPaneShell({ id: `pane-${panes.length}`, primary: false });
+    paneGrid.append(shell.section);
+    const pane = makePaneContext(shell, roomLens(), false);
+    panes.push(pane);
+    created.add(pane);
+  }
+  while (panes.length > lenses.length) {
+    const removed = panes.pop();
+    if (removed === undefined) {
+      break;
+    }
+    if (activePane === removed) {
+      activePane = null;
+    }
+    removed.shell.section.remove();
+  }
+
+  panes.forEach((pane, index) => {
+    const lens = lenses[index] ?? roomLens();
+    const changed = formatPaneLens(pane.lens) !== formatPaneLens(lens);
+    pane.lens = lens;
+    if (created.has(pane) || changed) {
+      repaintPane(pane);
+    }
+  });
+
+  syncPaneChrome();
+  syncPaneHeaders();
+  if (panesDialog.open) {
+    renderPanesDialog();
+  }
+  persistPanes();
+}
+
+function removePaneAt(index: number): void {
+  const lenses = panes
+    .map((pane) => pane.lens)
+    .filter((_, current) => current !== index);
+  applyPanes(lenses.length === 0 ? [roomLens()] : lenses);
+}
+
+function resizePanes(count: number): PaneLens[] {
+  const target = Math.min(MAX_PANES, Math.max(1, count));
+  const lenses = panes.map((pane) => pane.lens).slice(0, target);
+  while (lenses.length < target) {
+    const used = new Set(
+      lenses
+        .filter(
+          (lens): lens is { kind: "agent"; actorId: string } => lens.kind === "agent"
+        )
+        .map((lens) => lens.actorId)
+    );
+    const next = orderedAgents().find((agent) => !used.has(agent.actorId));
+    lenses.push(next ? { kind: "agent", actorId: next.actorId } : roomLens());
+  }
+  return lenses;
+}
+
+function panesForAllAgents(): PaneLens[] {
+  const eligible = orderedAgents().filter(railEligible);
+  const agents = eligible.length > 0 ? eligible : orderedAgents();
+  if (agents.length === 0) {
+    return [roomLens()];
+  }
+  return agents.slice(0, MAX_PANES).map((agent) => ({ kind: "agent", actorId: agent.actorId }));
+}
+
+function renderPanesDialog(): void {
+  for (const button of Array.from(
+    panesLayouts.querySelectorAll<HTMLButtonElement>(".panes-layout")
+  )) {
+    button.setAttribute("aria-pressed", String(Number(button.dataset.count) === panes.length));
+  }
+  const lanes = panes.filter((pane) => pane.lens.kind === "agent").length;
+  panesStatus.textContent =
+    `${panes.length} 个窗格 · ${lanes} 个 Agent 车道` +
+    (panes.length >= 5 ? " · 多格用于监看进度，长文请单独放大或回单窗格" : "");
+
+  panesAssignments.replaceChildren();
+  const agents = orderedAgents();
+  panes.forEach((pane, index) => {
+    const row = document.createElement("li");
+    row.className = "panes-assignment";
+    const label = document.createElement("span");
+    label.className = "panes-assignment-index";
+    label.textContent = `窗格 ${index + 1}`;
+    const select = document.createElement("select");
+    select.setAttribute("aria-label", `窗格 ${index + 1} 显示内容`);
+    fillPaneLensOptions(select, agents, formatPaneLens(pane.lens));
+    select.addEventListener("change", () => {
+      const lenses = panes.map((item) => item.lens);
+      lenses[index] = parsePaneLens(select.value) ?? roomLens();
+      applyPanes(lenses);
+    });
+    row.append(label, select);
+    panesAssignments.append(row);
+  });
+}
+
+function openPanesDialog(): void {
+  renderPanesDialog();
+  if (typeof panesDialog.showModal === "function") {
+    panesDialog.showModal();
+  } else {
+    panesDialog.setAttribute("open", "");
+  }
+}
+
+function closePanesDialog(): void {
+  if (typeof panesDialog.close === "function") {
+    panesDialog.close();
+  } else {
+    panesDialog.removeAttribute("open");
+  }
+}
+
+function bindPanesUi(): void {
+  legacyJumpLatest.addEventListener("click", () => {
+    panes[0]?.follow.resume();
+  });
+  panesToggle.addEventListener("click", openPanesDialog);
+  panesClose.addEventListener("click", closePanesDialog);
+  panesLayouts.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const button = target.closest<HTMLButtonElement>(".panes-layout");
+    if (button === null) return;
+    applyPanes(resizePanes(Number(button.dataset.count)));
+  });
+  panesFillAgents.addEventListener("click", () => {
+    applyPanes(panesForAllAgents());
+  });
+  panesReset.addEventListener("click", () => {
+    applyPanes([roomLens()]);
+  });
+  panesOpenWindow.addEventListener("click", () => {
+    window.open(window.location.href, "_blank", "noopener");
+  });
+}
+
+function initPanes(): void {
+  const primaryShell = createPaneShell({
+    id: "pane-0",
+    primary: true,
+    timeline: byId<HTMLOListElement>("timeline"),
+    empty: byId<HTMLLIElement>("timeline-empty")
+  });
+  const primary = makePaneContext(primaryShell, roomLens(), true);
+  panes = [primary];
+  activePane = null;
+  usePaneContext(primary);
+  bindPanesUi();
+  applyPanes(readStoredPanes());
+  usePaneContext(primary);
+}
+
+/** A pending restart still appears in the roster, but it cannot accept work. */
+function railEligible(agent: AgentView): boolean {
+  return agent.enabled && agent.status !== "pending_restart";
+}
+
+/**
+ * The right-hand activity rail. This is a work monitor, not a second roster:
+ * membership is limited to agents that can actually accept work, and the only
+ * verbs are "spin while busy" and "jump to what it just produced".
+ */
+function renderComposerAgents(): void {
+  const agents = orderedAgents().filter(railEligible);
+  const signature = agents
+    .map((agent) => `${agent.actorId}\u0000${agent.displayName}`)
+    .join("\u0001");
+  if (signature !== composerRailSignature) {
+    composerRailSignature = signature;
+    composerAgents.replaceChildren();
+    // Two rows, readable order: row 1 is agents 1..k, row 2 is k+1..N.
+    composerAgents.style.gridTemplateColumns =
+      agents.length === 0 ? "" : `repeat(${Math.ceil(agents.length / 2)}, 30px)`;
+    for (const agent of agents) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = `composer-agent ${cardToneClass(agent.actorId)}`;
+      button.dataset.agent = agent.actorId;
+      const ring = document.createElement("span");
+      ring.className = "composer-agent-ring";
+      ring.setAttribute("aria-hidden", "true");
+      const monogram = document.createElement("span");
+      monogram.className = "composer-agent-monogram";
+      monogram.textContent = agentMonogram(agent.displayName);
+      monogram.setAttribute("aria-hidden", "true");
+      button.append(ring, monogram);
+      button.addEventListener("click", () => jumpToAgentLatest(agent.actorId));
+      composerAgents.append(button);
+    }
+  }
+  composerAgents.hidden = agents.length === 0;
+  syncAgentActivity();
+  syncJumpLatestGeometry();
+}
+
+/** Project the current view's Turns onto the send button and the rail. */
+function syncAgentActivity(): void {
+  const railAgents = orderedAgents().filter(railEligible);
+  const railIds = new Set(railAgents.map((agent) => agent.actorId));
+  const working = new Set(activeTurnActorIds(state.turns.values()));
+  for (const button of Array.from(
+    composerAgents.querySelectorAll<HTMLButtonElement>(".composer-agent")
+  )) {
+    const actorId = button.dataset.agent ?? "";
+    if (!railIds.has(actorId)) {
+      button.remove();
+      continue;
+    }
+    const agent = state.agents.get(actorId);
+    if (!agent) continue;
+    const isWorking = working.has(actorId);
+    // A fresh Turn makes the previous finish dot stale: the icon is spinning
+    // again, so keeping the dot would show two contradictory states.
+    if (isWorking) finishedAgents.delete(actorId);
+    const finished = finishedAgents.get(actorId);
+    button.dataset.working = isWorking ? "true" : "false";
+    if (finished === undefined) delete button.dataset.finished;
+    else button.dataset.finished = finished.status;
+    button.setAttribute("aria-busy", String(isWorking));
+    const statusLabel = isWorking
+      ? "正在工作"
+      : finished === undefined
+        ? humanStatus(agent.status)
+        : humanStatus(finished.status);
+    button.title = `${agent.displayName} · ${statusLabel}`;
+    button.setAttribute("aria-label", `查看 ${agent.displayName} 的最新回复（${statusLabel}）`);
+  }
+  // A disabled/removed agent keeps no orphaned mark. Iterate a copy: delete
+  // during Map iteration is legal, but the copy makes the intent explicit.
+  for (const actorId of Array.from(finishedAgents.keys())) {
+    if (!railIds.has(actorId)) finishedAgents.delete(actorId);
+  }
+  syncSendButton();
+}
+
+function announceAgentActivity(actorId: string, status: string): void {
+  const agent = state.agents.get(actorId);
+  if (!agent || !railEligible(agent)) return;
+  agentActivityLive.textContent = `「${agent.displayName}」${humanStatus(status)}`;
 }
 
 function syncTargetAvailability(): void {
@@ -3683,8 +4655,28 @@ function setTargetPickerOpen(open: boolean): void {
   first?.focus();
 }
 
+/** The current conversation, not another workspace or a replayed history. */
+function isRoomWorking(): boolean {
+  return conversationView === null && activeTurnActorIds(state.turns.values()).length > 0;
+}
+
 function syncSendButton(): void {
-  sendButton.disabled = state.submitting || messageInput.value.trim().length === 0;
+  const submitting = state.submitting;
+  const working = !submitting && isRoomWorking();
+  const busy = submitting || working;
+  sendButton.disabled = busy || messageInput.value.trim().length === 0;
+  sendButton.classList.toggle("is-working", busy);
+  sendButton.setAttribute("aria-busy", String(busy));
+  sendButton.title = submitting
+    ? "正在提交…"
+    : working
+      ? BUSY_SEND_STATUS
+      : "发送给已选 Agent";
+  // The blocked-Enter hint must not outlive the lock that produced it, or the
+  // bar would say "still working" next to an enabled send button.
+  if (!busy && composerStatus.textContent === BUSY_SEND_STATUS) {
+    setComposerStatus("");
+  }
 }
 
 function setComposerBusy(busy: boolean): void {
@@ -3918,6 +4910,10 @@ function invalidatePendingSubmission(): void {
 }
 
 async function submitMessage(): Promise<void> {
+  if (isRoomWorking()) {
+    setComposerStatus(BUSY_SEND_STATUS);
+    return;
+  }
   const content = messageInput.value.trim();
   const to = selectedTargets();
   if (!content) {
@@ -3962,6 +4958,16 @@ async function submitMessage(): Promise<void> {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    // The 202 snapshot closes the gap between the POST and the first SSE frame:
+    // without it the button would unlock for a few milliseconds and allow a
+    // second send that bypasses the busy lock. seedOnly never regresses a Turn
+    // the SSE already advanced.
+    finishedAgents.clear();
+    for (const value of extractCollection(accepted, ["turns"])) {
+      const turn = normalizeTurn(value);
+      if (turn !== null) renderTurn(turn, { seedOnly: true });
+    }
+    syncAgentActivity();
     messageInput.value = "";
     clearDraft();
     updateCharacterCount();
@@ -3990,6 +4996,8 @@ async function resumeViewedConversation(): Promise<void> {
   if (view === null) return;
   if (view.conversation.active) {
     conversationView = null;
+    syncViewedConversationParam(null);
+    syncConversationSelection();
     viewingBanner.hidden = true;
     return;
   }
@@ -4006,6 +5014,8 @@ async function resumeViewedConversation(): Promise<void> {
   const throughSeq = isRecord(response) ? readNumberField(response, "throughSeq") : null;
   conversationView = null;
   conversationViewToken += 1;
+  syncViewedConversationParam(null);
+  syncConversationSelection();
   viewingBanner.hidden = true;
   if (throughSeq !== null) {
     openEpochStartSeq = Math.max(openEpochStartSeq, throughSeq + 1);
@@ -4131,33 +5141,45 @@ function reconnectForGap(receivedSeq: number): void {
 }
 
 function refreshEmptyStateCopy(): void {
-  if (!timelineEmpty.isConnected) {
+  for (const pane of panes) {
+    refreshPaneEmptyCopy(pane);
+  }
+}
+
+function refreshPaneEmptyCopy(pane: PaneContext): void {
+  const heading = pane.empty.querySelector("h3");
+  const paragraph = pane.empty.querySelector("p");
+  if (heading === null || paragraph === null) {
     return;
   }
-  const heading = timelineEmpty.querySelector("h3");
-  const paragraph = timelineEmpty.querySelector("p");
-  if (conversationView !== null) {
-    if (heading) heading.textContent = "这段对话没有可显示的消息";
-    if (paragraph) {
-      paragraph.textContent = "直接在下方发送消息即可从这里继续；旧记录不会被改写。";
+  if (pane.lens.kind === "agent") {
+    const agent = state.agents.get(pane.lens.actorId);
+    if (agent === undefined) {
+      heading.textContent = "该 Agent 不在当前名册";
+      paragraph.textContent = "用窗格标题或顶部 ▦ 换一个 Agent。";
+      return;
     }
+    if (!agent.enabled) {
+      heading.textContent = `「${agent.displayName}」已停用`;
+      paragraph.textContent = "历史输出仍可查看；启用后新回合才会出现在这里。";
+      return;
+    }
+    heading.textContent = `还没有「${agent.displayName}」的输出`;
+    paragraph.textContent = "本轮发给该 Agent 的内容会出现在这里。";
+    return;
+  }
+  if (conversationView !== null) {
+    heading.textContent = "这段对话没有可显示的消息";
+    paragraph.textContent = "直接在下方发送消息即可从这里继续；旧记录不会被改写。";
     return;
   }
   if (openEpochStartSeq > FIRST_EPOCH_START_SEQ) {
-    if (heading) {
-      heading.textContent = "新对话已开始";
-    }
-    if (paragraph) {
-      paragraph.textContent = "上下文与原生会话已重置，从这里开始计数；上一条对话在左侧列表里只读查看。";
-    }
+    heading.textContent = "新对话已开始";
+    paragraph.textContent = "上下文与原生会话已重置，从这里开始计数；上一条对话在左侧列表里只读查看。";
     return;
   }
-  if (heading) {
-    heading.textContent = "房间已就绪";
-  }
-  if (paragraph) {
-    paragraph.textContent = "保持 @all 并行提问，或只勾选一个 Agent 单独对话。监督由房间 Agent 的 send/ask 启动。";
-  }
+  heading.textContent = "房间已就绪";
+  paragraph.textContent = "保持 @all 并行提问，或只勾选一个 Agent 单独对话。监督由房间 Agent 的 send/ask 启动。";
 }
 
 async function refreshHealth(): Promise<void> {
@@ -4225,10 +5247,15 @@ function updateComposerWorkspace(): void {
     composerWorkspace.hidden = true;
     composerWorkspacePath.textContent = "";
     composerWorkspace.removeAttribute("title");
+    composerWorkspace.removeAttribute("aria-label");
     return;
   }
   composerWorkspacePath.textContent = shortenWorkspacePath(workspace);
-  composerWorkspace.title = `${active === undefined ? "工作目录" : `工作目录 ${active.label}`} · ${workspace}（点击切换）`;
+  const description = `${active === undefined ? "工作目录" : `工作目录 ${active.label}`} · ${workspace}（点击切换）`;
+  composerWorkspace.title = description;
+  // The narrow stages hide the label and the path text, so the button needs its
+  // own name instead of relying on the visible copy.
+  composerWorkspace.setAttribute("aria-label", description);
   composerWorkspace.hidden = false;
 }
 
@@ -4332,6 +5359,7 @@ async function bootstrap(): Promise<void> {
       applyConfiguredWorkspace(setupSnapshot);
       applyConfiguredRoster(setupSnapshot);
     }
+    paneRosterReady = true;
     renderAgents();
 
     const replayWindow = extractCollection(decoded, ["recentEvents", "events"])
@@ -4398,7 +5426,7 @@ async function bootstrap(): Promise<void> {
     if (conversationId !== null && conversationId.length > 0) {
       const target = conversations.find((conversation) => conversation.conversationId === conversationId);
       if (target === undefined) {
-        showGlobalError("该对话不存在，或已从当前工作目录的列表中隐藏。");
+        showGlobalError("该对话不存在，或已被删除。");
       } else if (!target.active) {
         void enterConversationView(target);
       }
@@ -4516,11 +5544,6 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("scroll", closeWorkspaceMenu, true);
 window.addEventListener("resize", closeWorkspaceMenu);
 
-hiddenConversationsButton.addEventListener("click", () => {
-  showHiddenConversations = !showHiddenConversations;
-  renderConversations();
-});
-
 conversationTocButton.addEventListener("click", (event) => {
   event.stopPropagation();
   setConversationTocOpen(!conversationTocOpen);
@@ -4549,10 +5572,6 @@ clearReplyButton.addEventListener("click", clearReply);
 
 compactContextButton.addEventListener("click", () => {
   void compactCurrentContext();
-});
-
-jumpLatest.addEventListener("click", () => {
-  roomFollow.resume();
 });
 
 memoryForm.addEventListener("submit", (event) => {
@@ -4901,6 +5920,7 @@ memoryClose.addEventListener("click", () => {
   else memoryDialog.removeAttribute("open");
 });
 
+initPanes();
 initTheme();
 restoreDraft();
 restoreAssistantDrawer();

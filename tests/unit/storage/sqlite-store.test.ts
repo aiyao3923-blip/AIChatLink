@@ -2604,3 +2604,149 @@ describe.sequential("SqliteAIChatLinkStore paging and cursors", () => {
     expectAIChatLinkCode(() => fixture.store.listActors(), "STORE_UNAVAILABLE");
   });
 });
+
+/**
+ * Completes one Turn end to end so the purge test has a real attempt, response
+ * event and dated-memory source behind the conversation it deletes.
+ */
+function completeTurn(
+  fixture: Fixture,
+  clientCommandId: string,
+  content: string,
+  answer: string
+): { turnId: string; messageEventId: string; responseEventId: string; responseSeq: number } {
+  const accepted = fixture.store.acceptMessage(messageInput(clientCommandId, content));
+  const turnId = accepted.turns[0]!.turnId;
+  const source = fixture.store.getEvent(accepted.messageEventId)!;
+  const claim = fixture.store.claimNextQueuedTurn({
+    targetActorId: "agent:codex",
+    bindingId: "binding:codex",
+    instanceId: "instance:codex",
+    contextThroughSeq: source.seq,
+    expectedTurnId: turnId,
+    expectedTransport: "structured"
+  })!;
+  fixture.store.markPromptInvoked(claim.attempt.attemptId);
+  fixture.store.markAttemptRunning(claim.attempt.attemptId, `native-${turnId}`);
+  const terminal = fixture.store.terminalizeTurn({
+    turnId,
+    attemptId: claim.attempt.attemptId,
+    status: "completed",
+    content: answer,
+    occurredAt: "2026-08-11T12:00:00.000Z"
+  });
+  const response = terminal.responseEvent!;
+  return { turnId, messageEventId: accepted.messageEventId, responseEventId: response.eventId, responseSeq: response.seq };
+}
+
+describe.sequential("conversation purge", () => {
+  it("permanently removes one epoch and keeps the FK graph and memories coherent", () => {
+    const fixture = createFixture();
+    const first = completeTurn(fixture, "purge-first", "the plan to delete", "an old answer");
+    const boundary = fixture.store.getRoomHighWaterSeq("room:main");
+    fixture.store.recordContextReset({ roomId: "room:main", throughSeq: boundary });
+    const second = completeTurn(fixture, "purge-second", "the plan to keep", "a new answer");
+    // A fan-out child queued after the boundary still points at the doomed Turn
+    // through `parent_turn_id`; both the child and its queue event must go.
+    const child = fixture.store.enqueueTurn({
+      sourceEventId: second.messageEventId,
+      targetActorId: "agent:grok",
+      adapterId: "grok",
+      transport: "structured",
+      parentTurnId: first.turnId,
+      rootCorrelationId: "corr_purge_child",
+      hopCount: 1
+    });
+
+    const memory = fixture.store.rememberMemory({
+      scopeType: "room",
+      scopeId: "room:main",
+      kind: "note",
+      authorActorId: "user:web",
+      content: "the plan to delete was noted",
+      sourceEventId: first.responseEventId,
+      sourceKind: "web",
+      createdAt: "2026-08-11T12:01:00.000Z"
+    });
+    const rollupQuery = {
+      roomId: "room:main",
+      actorId: "agent:codex",
+      localDate: "2026-08-11"
+    } as const;
+    expect(fixture.store.getAgentDatedMemoryRollup(rollupQuery)).toMatchObject({
+      pendingTurns: 2
+    });
+
+    const result = fixture.store.purgeConversationRange({
+      roomId: "room:main",
+      fromSeq: 1,
+      throughSeq: boundary
+    });
+    expect(result.deletedEvents).toBeGreaterThan(0);
+    expect(result.deletedTurns).toBe(2);
+
+    // The deleted epoch's rows are gone; the open one is untouched.
+    expect(fixture.store.getEvent(first.messageEventId)).toBeUndefined();
+    expect(fixture.store.getTurn(first.turnId)).toBeUndefined();
+    expect(fixture.store.getTurn(child.turnId)).toBeUndefined();
+    expect(fixture.store.getEvent(child.queuedEventId)).toBeUndefined();
+    expect(fixture.store.listTurnAttempts(first.turnId)).toEqual([]);
+    expect(fixture.store.getEvent(second.messageEventId)?.eventType).toBe("message.created");
+    expect(fixture.store.getTurn(second.turnId)?.status).toBe("completed");
+
+    // The reset boundary stays as an empty epoch: nothing is renumbered.
+    expect(fixture.store.listContextResets("room:main").map((reset) => reset.throughSeq)).toEqual([
+      boundary
+    ]);
+    expect(fixture.store.hasRoomContextMessage("room:main", 0, boundary)).toBe(false);
+    expect(fixture.store.getRoomHighWaterSeq("room:main")).toBeGreaterThanOrEqual(second.responseSeq);
+
+    // Memory is a distinct data class: the text survives, the dead pointer goes.
+    expect(fixture.store.getMemory(memory.memoryId)).toMatchObject({
+      content: "the plan to delete was noted"
+    });
+    expect(fixture.store.getMemory(memory.memoryId)?.sourceEventId).toBeUndefined();
+
+    // Pending dated-memory work is recomputed instead of keeping a phantom Turn.
+    const rollupAfter = fixture.store.getAgentDatedMemoryRollup(rollupQuery)!;
+    expect(rollupAfter.pendingTurns).toBe(1);
+    expect(rollupAfter.pendingChars).toBeGreaterThan(0);
+    expect(
+      fixture.store.listAgentDatedMemorySources({
+        roomId: "room:main",
+        actorId: "agent:codex",
+        localDate: "2026-08-11",
+        pendingOnly: true
+      })
+    ).toHaveLength(1);
+
+    // No FK dangles and the file is still a healthy SQLite database.
+    const raw = new Database(fixture.databasePath);
+    try {
+      expect(raw.pragma("foreign_key_check")).toEqual([]);
+      expect(raw.pragma("integrity_check")).toEqual([{ integrity_check: "ok" }]);
+    } finally {
+      raw.close();
+    }
+
+    // A later message continues the monotonic seq space; nothing is reused.
+    const third = fixture.store.acceptMessage(messageInput("purge-third", "after the purge"));
+    expect(fixture.store.getEvent(third.messageEventId)!.seq).toBeGreaterThan(second.responseSeq);
+  });
+
+  it("returns zero counts for an empty range and rejects an inverted one", () => {
+    const fixture = createFixture();
+    const accepted = fixture.store.acceptMessage(messageInput("purge-empty", "stay"));
+    const seq = fixture.store.getEvent(accepted.messageEventId)!.seq;
+
+    expect(
+      fixture.store.purgeConversationRange({ roomId: "room:main", fromSeq: seq + 10, throughSeq: seq + 20 })
+    ).toEqual({ deletedEvents: 0, deletedTurns: 0 });
+    expectAIChatLinkCode(
+      () =>
+        fixture.store.purgeConversationRange({ roomId: "room:main", fromSeq: seq + 4, throughSeq: seq }),
+      "INVALID_ENVELOPE"
+    );
+    expect(fixture.store.getEvent(accepted.messageEventId)).toBeDefined();
+  });
+});

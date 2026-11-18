@@ -19,6 +19,8 @@ import type {
   RestartAgentRequest,
   ResetContextRequest,
   ResumeConversationRequest,
+  DeleteConversationRequest,
+  DeleteConversationResult,
   RoomContextResetResult,
   RoomContextUsage,
   RetractIdentityRequest,
@@ -160,6 +162,10 @@ export interface BrokerApi {
     request: ResumeConversationRequest,
     signal: AbortSignal
   ): Awaitable<RoomContextResetResult>;
+  deleteConversation(
+    request: DeleteConversationRequest,
+    signal: AbortSignal
+  ): Awaitable<DeleteConversationResult>;
   compactContext(
     request: CompactContextRequest,
     signal: AbortSignal

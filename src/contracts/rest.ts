@@ -61,6 +61,8 @@ export const ConversationSummarySchema = z.strictObject({
   endSeq: z.number().int().positive().nullable(),
   startedAt: z.string().min(1).max(64),
   active: z.boolean(),
+  /** The open epoch holds no room-context message yet; the sidebar hides it. */
+  empty: z.boolean(),
   /** Closed conversation this epoch was resumed from, if any. */
   resumedFrom: ResumedConversationSchema.nullable()
 });
@@ -75,10 +77,24 @@ export const ResumeConversationRequestSchema = z.strictObject({
   resetNativeSessions: z.boolean().optional()
 });
 
+export const DeleteConversationRequestSchema = z.strictObject({
+  clientCommandId: ClientCommandIdSchema,
+  conversationId: z.string().min(1).max(64),
+  resetNativeSessions: z.boolean().optional()
+});
+
+export const DeleteConversationResultSchema = z.strictObject({
+  conversationId: z.string().min(1).max(64),
+  deletedEvents: NonNegativeIntegerSchema,
+  deletedTurns: NonNegativeIntegerSchema
+});
+
 
 export type ConversationSummary = z.infer<typeof ConversationSummarySchema>;
 export type ConversationList = z.infer<typeof ConversationListSchema>;
 export type ResumeConversationRequest = z.infer<typeof ResumeConversationRequestSchema>;
+export type DeleteConversationRequest = z.infer<typeof DeleteConversationRequestSchema>;
+export type DeleteConversationResult = z.infer<typeof DeleteConversationResultSchema>;
 export type ResetContextRequest = z.infer<typeof ResetContextRequestSchema>;
 export type RoomContextResetResult = z.infer<typeof RoomContextResetResultSchema>;
 
@@ -88,6 +104,14 @@ export function parseConversationList(input: unknown): ConversationList {
 
 export function parseResumeConversationRequest(input: unknown): ResumeConversationRequest {
   return parseWriteRequest(ResumeConversationRequestSchema, input);
+}
+
+export function parseDeleteConversationRequest(input: unknown): DeleteConversationRequest {
+  return parseWriteRequest(DeleteConversationRequestSchema, input);
+}
+
+export function parseDeleteConversationResult(input: unknown): DeleteConversationResult {
+  return parseContractOutput(DeleteConversationResultSchema, input);
 }
 
 export function parseResetContextRequest(input: unknown): ResetContextRequest {

@@ -639,9 +639,10 @@ CLI 只有在当前配置的 origin 可达，且旧 runtime 的 `runtimeKey` 完
 ```http
 GET  /api/conversations
 POST /api/conversations/resume
+POST /api/conversations/delete
 ```
 
-`GET /api/conversations` 把 `context_resets` 的 `through_seq` 边界投影成对话列表：`conversationId=conv:<startSeq>`、标题取该纪元第一条用户消息（无消息时 `对话 N`）、`startSeq/endSeq/startedAt`，最后一个纪元 `active=true`。**没有任何房间消息（`message.created` / `operator.dispatch`）的已关闭纪元不进入列表**——连续 reset 或 reset 后立刻续聊会在边界上留下只含 `context.reset` 事件的一格，它没有内容可回放，不伪装成 `对话 N`；活动纪元始终列出，用于「新对话已开始」的空态。若该纪元的边界带续聊种子，则额外返回 `resumedFrom`：`{ conversationId, title, fromSeq, throughSeq }`，标题在无自有消息时写成 `<源对话> · 续`。该接口只读，不新增表，不改事件模型。
+`GET /api/conversations` 把 `context_resets` 的 `through_seq` 边界投影成对话列表：`conversationId=conv:<startSeq>`、标题取该纪元第一条用户消息（无消息时 `对话 N`）、`startSeq/endSeq/startedAt`，最后一个纪元 `active=true`。**没有任何房间消息（`message.created` / `operator.dispatch`）的已关闭纪元不进入列表**——连续 reset 或 reset 后立刻续聊会在边界上留下只含 `context.reset` 事件的一格，它没有内容可回放，不伪装成 `对话 N`。活动纪元始终列出（即使为空），并带 `empty: true`：侧栏不把空纪元渲染成 `对话 N`，但主时间线要读它的 `startSeq` 当 live 边界，所以它必须留在响应里。若该纪元的边界带续聊种子，则额外返回 `resumedFrom`：`{ conversationId, title, fromSeq, throughSeq }`，标题在无自有消息时写成 `<源对话> · 续`。该接口只读，不新增表，不改事件模型。
 
 `POST /api/conversations/resume` 接受严格 `{ clientCommandId, conversationId, resetNativeSessions? }`。它把一段**已关闭**的对话重新打开为**新纪元**：在当前 high-water 处写一条带续聊种子的 `context.reset`，因此后续 Context Packet 的 `[resumed_conversation]` 区段会逐条重放该对话区间。
 
@@ -650,6 +651,16 @@ POST /api/conversations/resume
 - `resetNativeSessions` 默认 `true`（与 `/api/context/reset` 相反），因为续聊的目的就是给新纪元一个干净的 native session，而不是把旧 native 上下文和种子叠加两次。
 - 同一 `clientCommandId` 单飞并重放同一结果；种子不改写、不移动、不删除任何既有事件或 `seq`。
 - 响应与 `/api/context/reset` 同形（`RoomContextResetResult`），usage 里额外带 `resumedMessageCount`，表示种子贡献的消息条数。
+
+`POST /api/conversations/delete` 接受严格 `{ clientCommandId, conversationId, resetNativeSessions? }`，返回 `{ conversationId, deletedEvents, deletedTurns }`。它是**永久清除**（D-043），不是隐藏：
+
+- 目标按同一 `context_resets` 投影解析；未知 id 返回 `UNKNOWN_TARGET`。
+- 房间还有 `queued / dispatching / running / cancelling` 回合时返回 `INVALID_ENVELOPE`（`details.pendingTurns`），不修改任何数据；先取消或等回合结束再删。
+- **已关闭纪元**：直接删除 `[startSeq, endSeq]` 的事务性数据（`events`、`turns` 与其子回合、`turn_attempts`、supervision 行、dated-memory 源、覆盖该区间的 summary），不发新事件。
+- **活动纪元**：先按 `/api/context/reset` 的语义关闭（写 `context.reset`、`resetNativeSessions` 默认 `true` 时 `restartFresh` 全部适配器），再删除旧区间。因此删除当前对话后，房间正好剩一个空的开放纪元。
+- `context_resets` 边界行不删除，`seq` 不重编号也不复用：删除留下空洞，游标仍按 `>` 比较。
+- 记忆是独立数据类：`memory_records` / `identity_records` 的内容保留，只有指向被删事件的 `source_event_id` 被置空。
+- 同一 `clientCommandId` 单飞并重放同一结果；即使对话已不存在，重试仍返回当初的回执。
 
 
 ### 10.10 工作目录 hub 与 `?ws` 路由

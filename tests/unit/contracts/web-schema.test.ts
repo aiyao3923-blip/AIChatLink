@@ -31,6 +31,8 @@ import {
   SupersedeIdentityRequestSchema,
   SupersedeMemoryRequestSchema,
   parseConversationList,
+  parseDeleteConversationRequest,
+  parseDeleteConversationResult,
   parseCreateMessageAccepted,
   parseAIChatLinkEnvelope,
   parseResumeConversationRequest
@@ -286,6 +288,7 @@ describe("conversation resume contracts", () => {
           endSeq: null,
           startedAt: "2026-08-11T00:00:00.000Z",
           active: true,
+          empty: false,
           resumedFrom: {
             conversationId: "conv:1",
             title: "plan",
@@ -300,6 +303,7 @@ describe("conversation resume contracts", () => {
           endSeq: 11,
           startedAt: "2026-08-11T00:00:00.000Z",
           active: false,
+          empty: false,
           resumedFrom: null
         }
       ]
@@ -320,6 +324,47 @@ describe("conversation resume contracts", () => {
         ]
       })
     ).toThrow();
+  });
+});
+
+describe("conversation delete contracts", () => {
+  it("requires a client command id and a conversation id", () => {
+    expect(
+      parseDeleteConversationRequest({
+        clientCommandId: "web-delete-1",
+        conversationId: "conv:12",
+        resetNativeSessions: true
+      })
+    ).toEqual({
+      clientCommandId: "web-delete-1",
+      conversationId: "conv:12",
+      resetNativeSessions: true
+    });
+    expect(() => parseDeleteConversationRequest({ conversationId: "conv:12" })).toThrow();
+    expect(() =>
+      parseDeleteConversationRequest({ clientCommandId: "web-delete-1", conversationId: "" })
+    ).toThrow();
+    expect(() =>
+      parseDeleteConversationRequest({
+        clientCommandId: "web-delete-1",
+        conversationId: "conv:12",
+        hard: true
+      })
+    ).toThrow();
+  });
+
+  it("projects the deleted row counts", () => {
+    expect(
+      parseDeleteConversationResult({
+        conversationId: "conv:12",
+        deletedEvents: 3,
+        deletedTurns: 1
+      })
+    ).toEqual({ conversationId: "conv:12", deletedEvents: 3, deletedTurns: 1 });
+    expect(() =>
+      parseDeleteConversationResult({ conversationId: "conv:12", deletedEvents: -1, deletedTurns: 0 })
+    ).toThrow();
+    expect(() => parseDeleteConversationResult({ conversationId: "conv:12" })).toThrow();
   });
 });
 

@@ -11,6 +11,8 @@ import type {
   RememberIdentityRequest,
   RememberMemoryRequest,
   ResumeConversationRequest,
+  DeleteConversationRequest,
+  DeleteConversationResult,
   RestartAgentAccepted,
   RestartAgentRequest,
   RoomContextUsage,
@@ -26,6 +28,7 @@ import {
   parseCompactContextResult,
   parseConversationList,
   parseCreateMessageAccepted,
+  parseDeleteConversationResult,
   parseRoomContextResetResult,
   parseRoomContextUsage
 } from "../contracts/rest.js";
@@ -72,6 +75,7 @@ type WebBrokerSurface = Pick<
   | "compactContextFromBinding"
   | "resetContextFromBinding"
   | "resumeConversationFromBinding"
+  | "deleteConversationFromBinding"
   | "queryMemory"
   | "queryIdentity"
   | "rememberMemory"
@@ -186,6 +190,22 @@ export class AIChatLinkWebBrokerApi implements BrokerApi {
     this.#requireWritable(signal);
     return parseRoomContextResetResult(
       await this.#broker.resumeConversationFromBinding({
+        bindingId: this.#bindingId,
+        clientCommandId: request.clientCommandId,
+        conversationId: request.conversationId,
+        roomId: this.roomId,
+        resetNativeSessions: request.resetNativeSessions !== false
+      })
+    );
+  }
+
+  async deleteConversation(
+    request: DeleteConversationRequest,
+    signal: AbortSignal
+  ): Promise<DeleteConversationResult> {
+    this.#requireWritable(signal);
+    return parseDeleteConversationResult(
+      await this.#broker.deleteConversationFromBinding({
         bindingId: this.#bindingId,
         clientCommandId: request.clientCommandId,
         conversationId: request.conversationId,

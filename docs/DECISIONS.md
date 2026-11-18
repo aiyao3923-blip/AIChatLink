@@ -530,7 +530,7 @@ Hermes 0.20.1 的 initialize 当前未声明 `mcpCapabilities.http`，但官方�
 
 1. **对话 = context reset 纪元**。`GET /api/conversations` 把 `context_resets` 的 `through_seq` 边界投影为会话列表：标题取该纪元第一条用户消息（无消息时 `对话 N`），`startSeq/endSeq` 供历史回放，最后一个纪元 `active=true`。不新增表，不改事件模型。没有房间消息的已关闭纪元不投影（连续 reset 或 reset 后立刻续聊留下的空边界），活动纪元始终显示。
 2. **新对话 = reset + 重启原生 session**。`POST /api/context/reset` 复用 `resetContextFromBinding`；当 `resetNativeSessions=true` 时，SessionManager 走 `restartFresh`（不 resume 旧 native session），否则沿用 `restart`。这样新对话的上下文与 Agent 原生记忆都从空开始；旧 transcript 与服务端审计仍完整保留。
-3. **删除是隐藏，不是销毁**。事件是 append-only 审计事实；UI 的"删除"只把会话 id 写入 `localStorage` 并从列表隐藏，可恢复。UI 文案明确这一点，不假装硬删除。
+3. **删除是隐藏，不是销毁**（已被 D-043 取代：删除改为带确认的本地永久清除）。事件是 append-only 审计事实；UI 的"删除"只把会话 id 写入 `localStorage` 并从列表隐藏，可恢复。UI 文案明确这一点，不假装硬删除。
 4. **历史只读，发送即续聊**。旧纪元通过 `GET /api/events?afterSeq=` 回放；回放本身不写任何数据。后续修订（D-038）：在回放态发送会先经 `POST /api/conversations/resume` 把该对话续成新纪元，因此输入器不再禁用。
 5. **思考默认折叠**。`turn.reasoning.recorded` 仍在时间线占一行，但正文默认不显示，点击"推理记录 · 展开"才显示。
 6. **宿主下发模型事实**。pi 垫片在每条 prompt 前注入 `[host_agent] role/provider/model/thinking`；AIChatLink 对原生 driver 把同一事实拼进 `configured_agent_identity`。Agent 不再需要猜自己的模型，也禁止把猜测写成事实。
@@ -696,6 +696,181 @@ MCP 绑定（溯源）与会话（并发写同一 session 文件会互相破坏�
 
 完成标准：`npm run build`、739 项测试通过；房间 6 个 Agent 以 `driver:"pi"` + `piConfig:"shared"` 全部 `ready`；
 `agent:pi-lead` 的真实回合能报告 `subagent` 与 `mcp__aichatlink__ask` 均可用，并成功派发一次子 agent。
+
+## D-042：侧栏选中态跟主时间线，`?conv=` 跟回放走
+
+触发证据：用户给出截图——`?ws=ws_a0a7b35d5129&conv=conv%3Aa1` 正在查看已关闭对话「数据结构作业1-…」，左栏强调却仍停在「作业1：大数据概述」（标着 `当前`），用户描述为「深色的永远是第一个对话，切不动」。根因两条：①`.conversation-item.is-active` 直接取自 `conversation.active`（进行中的纪元），`enterConversationView()` 只改主时间线、从不更新侧栏；②`exitConversationView()` 用 `location.reload()` 退出却保留 `?conv=`，首屏 `conv` 分支立刻把同一段历史重新打开，所以「回到当前对话」与点回 `当前` 都等于原地跳一下。实测还发现第三个：`conv:<n>` 只在目录内唯一，两个目录都有 `conv:1`，按会话 id 判等会同时点亮两行。
+
+决定：
+
+1. **两个状态分开，各管一件事**。`is-active` = 该目录进行中的纪元（弱标记：边加深到 `--line-2`，语义交给既有 `当前 / 进行中` 文案）；`is-viewing` = 主时间线正在显示的那一段（含历史回放），是全栏唯一的强调色：`--accent` 边 + 1px `--accent` 环 + `--accent-wash` 底。其余会话行只要「和分组底、和邻行分开」：`--paper` 底 + `--line` 边，hover 到 `--paper-2`。二者同时成立（看的就是当前纪元）时，强调边框仍然只有一行。
+2. **选中态跟随 `conversationView`**，无回放时退回「当前目录进行中的纪元」。`syncConversationSelection()` 只切 class / `aria-current`，不重建列表，进入回放、退出回放、续聊成新纪元各调用一次；首屏渲染时由同一判定函数给出初始态。
+3. **workspace 参与判等**。选中判定同时比 `data-workspace-id`，否则另一个目录里同号的 `conv:1` 会被一起点亮。
+4. **`?conv=` 与回放双向同步**：进入回放 `replaceState` 写入，退出回放 / 续聊成新纪元 / 新建对话前删除。URL 里写下的东西必须能被撤掉，否则 URL 事实源和视图事实源互相打架。
+
+原因：用户要的是「当前主页面展示的对话加一点格外显眼的边框，其它对话只需要和背景区分」。把「正在看」与「还在写」赋予两种视觉权重，既回答了「我在看哪一段」，也不再把 `当前` 这个词当成选中语义；随后把 `conv` 参数补成可进可出，切换才真的是切换。
+
+变更条件：若将来需要第三种状态（置顶 / 多选批量操作），先改 `docs/WEB_UI.md` 的侧栏两级视觉登记再动手；若回放改为 `pushState` 导航（浏览器前进/后退可回放），退出必须走 `history` 语义而不只是删参数。
+
+完成标准：`npm run typecheck`、739 项测试与 `npm run build` 通过；真实实例（4310）实测四条路径——URL 直达历史、点进行中退出、点历史进入、点「回到当前对话」退出——强调边框始终唯一且随主时间线移动，另一目录同号会话不再被点亮，退出后 URL 不再带 `conv`；明暗两套确认强调环可辨（回放态截图为证）。
+
+## D-043：删除对话 = 带确认的永久清除（取代 D-034 第 3 条）
+
+触发证据：用户反馈两点——①左侧「×」删除不确认，确认后本机仍保存着该对话；②把某个工作目录的对话全部删除后，点该工作目录仍然跳进最后一个已删对话。核对实现：`×` 只把 `<wsId>::<conversationId>` 写进 `localStorage`，`events` 一行没删；而 `/api/bootstrap` 的 `recentEvents` 不按纪元截断，活动纪元里那段「已删」对话照旧回放，于是点目录 = 回到它。
+
+决定：
+
+1. **删除是销毁，且先确认**。侧栏的 `×` 改成垃圾桶图标 + `window.confirm`，文案写明「消息、回合与工具记录会从本地数据库永久删除，不能恢复；Agent 已记录的记忆不会被删除」。取消 = 不发请求，按钮不改状态。
+2. **服务端在一个事务里清除一个纪元**。`POST /api/conversations/delete`（严格 `{ clientCommandId, conversationId, resetNativeSessions? }`）按 `context_resets` 投影出的 `[startSeq, endSeq]` 删除：`events`、`turns`（含由 `parent_turn_id` 派生的子回合）、`turn_attempts`、`supervision_pairs` / `supervision_pair_turns` / `supervision_steer_counts`、`agent_dated_memory_sources`（并重算 `agent_dated_memory_rollups` 的 pending 计数）、覆盖该区间的 `summaries`；把 `memory_records` / `identity_records` 的 `source_event_id` 置空，把区间外 `events.reply_to_event_id` 置空。`context_resets` 行保留：边界不重写，`conversationId=conv:<startSeq>` 不会被复用。
+3. **删除活动纪元 = 先 reset 再清除**。复用 `resetNow(resetNativeSessions)` 关闭当前纪元（写 `context.reset`，必要时 `restartFresh` 全部适配器），再清除旧区间。`seq` 单调且不复用（`sqlite_sequence` 不回退），房间随后正好剩一个空的开放纪元。
+4. **有在飞回合就拒绝**。`queued / dispatching / running / cancelling` 任一存在时返回 `INVALID_ENVELOPE`，UI 报错并恢复按钮；不做「删一半再收尾」。
+6. **不再有本地隐藏表**。移除 `aichatlink:hidden-conversations`、`显示已隐藏` 按钮与 `.is-hidden-conversation`；`?conv=` 指向已删对话时报「该对话不存在，或已被删除」。
+
+**（2026-11-18 变更，用户截图 `PixPin_2026-11-18_17-16-22.png`）** 本决定原第 5 条写的是「空纪元不进侧栏」。用户删光某个目录的对话后，新开一段仍显示 `对话 3`，分组头也仍写 `5 / 3`。两条原因叠加：一是当时运行中的进程早于本功能（`POST /api/conversations/delete` 返回 404），删除从未落地，那两段只是旧本地隐藏集藏起来的；二是把空纪元藏掉之后，用户反而看不到「对话 1」。现按用户明确选择改为：**空纪元显示成 `对话 N`（`N = 现存对话数 + 1`），分组头计数只算实际渲染的行，为 0 时隐藏数字**。
+
+原因：用户要的是「删除就真的删掉」，不是把对话藏起来。append-only 是对**读与回放**的承诺（不改写、不重编号），不是拒绝用户清除自己数据的理由。删除后 `seq` 留下空洞，所有游标都是 `>` 比较，因此不需要重编号，也不需要迁移。
+
+变更条件：若将来要「回收站 / 撤销」，必须新增 tombstone 与延后清除，而不是恢复 localStorage 隐藏；若按 session 表重构，删除改为按 session 删除，本决定的表清单随之失效。
+
+完成标准：`npm run typecheck`、全量测试与 `npm run build` 通过；单测覆盖 store 清除（`PRAGMA foreign_key_check` 为空、`integrity_check=ok`、记忆来源置空、rollup pending 重算）、broker（关闭 / 活动纪元、在飞拒绝、`clientCommandId` 幂等）、HTTP 合同与 Web schema；真实实例中确认删除后该 `events` 行消失、`/api/conversations` 不再返回该对话、点该工作目录停留在空时间线。
+
+## D-044：输入器忙碌锁与 Agent 活动栏
+
+触发证据：用户截图 `PixPin_2026-11-18_17-09-58.png`——6 个 Agent 已完成一轮，输入器仍是普通「发送」，
+顶栏名册离输入动作太远；用户明确选择：①有任务在跑时发送键转圈**并禁用**，回合结束才可再发；
+②右侧 Agent 图标可点击跳到该 Agent 最新回复并高亮；③活动栏只显示已启用 Agent。
+
+决定：
+
+1. **输入器改为 dock**：`.composer-dock` 宽度仍取阅读列 `--column`；左侧 `.composer` 收窄，
+   右侧 `.composer-agents` 渲染 30px 头像活动栏（两排网格，列数 `ceil(N/2)`）。阅读列不变；只压缩卡片，不压缩 transcript。
+2. **忙碌口径 = 当前视图的未终态 Turn**。`isRoomWorking()` 只看 `conversationView === null` 时的
+   `state.turns`；不轮询 `/api/health.activeTurns`（全局数会锁住别的目录/对话）。
+   `web/agent-activity.ts` 把 `completed/failed/cancelled/interrupted` 视为终态，其余（含未知状态）
+   按未结束处理，fail-safe。
+3. **发送键状态机**：POST 在飞或当前视图有活 Turn 时，纸飞机换成 13px 旋转环、`disabled`、
+   `aria-busy=true`，`title` 说明等本轮结束。Turn 全部终态后按草稿是否为空恢复；
+   Enter/`requestSubmit` 在 `submitMessage()` 内走同一守卫，状态槽给出同一文案并在解锁时自动清空。
+4. **活动栏不是第二名册**：只收 `enabled && status !== "pending_restart"`；两排网格、行优先；无名字、无 driver、
+   无重启/配置。工作时 `--tone` 外环旋转；点击跳到该 Agent 在本对话最新**有 DOM 节点**的回复并
+   1.4s 高亮；无回复时用 `composer-status` 说明。
+5. **完成点只来自 live 终态跃迁**：`acceptEnvelope(source)` 把 `live` 传给 `dispatchEnvelope`，
+   bootstrap/replay 只重建卡片不点灯，否则刷新会把最近窗口里的旧完成全部标成「刚完成」。
+   `completed` 用 `--accent`，`failed` 用 `--danger`，其余 `--faint`；异常终态点击优先跳 Turn 卡片。
+   点图标、成功发送、换对话、`clearTimelineView()` 即清；仅内存，不写 localStorage/DB。
+6. **竞态处理**：POST 202 的 `turns` 以 `seedOnly` 种进 `state.turns`，关闭 202→SSE 空窗；
+   若 SSE 已推进/终态则跳过，绝不把已完成的 Turn 回退成 `queued`。终态事件本体不带
+   `targetActorId`，`renderTurnEnvelope()` 复用已有 Turn 的 target，避免 `turn.interrupted`
+   被记成 `system`。
+
+原因：用户要的是「还能不能发」与「谁先完成」两个明确判断，而不是装饰。发送键回答前者，活动栏回答后者；
+`state.turns` 已是三路（SSE/bootstrap/POST）维护的单一事实源，活动态只做投影，不引入第二份 Turn 状态。
+这不是审批层：草稿、取消、目标选择都保留，MCP/Agent 队列能力不变。
+
+变更条件：若真实使用证明「边跑边追加」不可缺，回滚只需让 `isRoomWorking()` 不再参与
+`sendButton.disabled` 与 `submitMessage()` 守卫两处，保留转圈与活动栏；若要持久未读，必须新增
+已读存储语义并把完成点从本轮提示升级为跨会话未读，届时另立决策。
+
+完成标准：`npm run typecheck`、`npx vitest run`（753 项，含新增 `web/agent-activity` 单测）、
+`npm run build` 全通过；真实实例 1600×1000 / 1280×800 / 430×900 三档无横向滚动、浮标不压活动栏；
+忙碌时发送键与目标头像转圈、发送禁用、Enter 被守卫、textarea 可继续写；终态后自动解锁、
+完成点点亮；点图标跳到最新回复并高亮；刷新时活 Turn 继续锁、已完成历史不点灯；历史回放不锁输入器。
+
+## D-045：dock 的宽度预算与 `＋ 工作目录` 的降级顺序
+
+触发证据：用户截图 `PixPin_2026-11-18_18-01-04.png`（1280×800 实窗口）——输入器被右侧活动栏压窄，
+操作条上只剩「发送给 @all | 上下文 | 压缩会话 | 发送」，工作目录按钮整块不见了，用户问「我的打开文件夹（工作目录）呢」，
+并要求「对话框往左边拉伸一点」。核对实现：`.composer-dock` 仍取 `var(--column)`，于是活动栏的 116px
+（6 个 Agent = 3×2 两排）全部从卡片里扣：1280×800 下卡片 768px；而 `@container (max-width: 800px)` 直接
+`display:none` 掉 `.composer-workspace`，与 `docs/WEB_UI.md` 早已写明的「`＋` 始终保留」互相矛盾——
+文档描述的是分级让步，代码实现的是整块删除。
+
+决定：
+
+1. **宽度预算记在面板边距上，不从卡片里扣**。`.app-shell` 新增 `--column-max: 1040px`；`.composer-dock`
+   宽度改为 `min(var(--column-max), calc(100% - 48px))`。列宽被压缩（面板 < 1088px）时 dock 改用 24px
+   外边距，卡片因此向左（并向右）各长 24px，而不是继续等比例缩窄；面板 ≥ 1088px 时与 `var(--column)` 完全等价，
+   1600×1000 布局一字不变。副作用：卡片可以比消息列宽出至多 24px/侧，这是有意的——阅读列是消息的度量，
+   不是输入器的上限。
+2. **`＋ 工作目录` 按部件降级，永不整块隐藏**。≤860 隐藏 meter（原有）；≤800 隐藏路径文字；
+   ≤700 隐藏「工作目录」标签并收成 24px 圆形加号（与 ≤760px 视口规则同形）；≤560 隐藏上下文估算（原有）。
+   `updateComposerWorkspace()` 同时写 `aria-label`，因为标签和路径都可能不可见。
+3. **活动栏位置不变**。仍在卡片右侧；`@container room (max-width: 900px)` 的纵向堆叠不变。
+
+原因：活动栏是「谁在跑」的投影，工作目录切换器是导航入口；前者可以牺牲输入器的一点点宽度，但不能把后者挤出操作条。
+两边都靠 container query 决定，所以修复必须落在同一个坐标系里（卡片内联宽度），而不是视口宽度——这正是原来
+移动端规则能显示圆形加号、宽屏窄卡片却整块消失的原因。
+
+变更条件：若用户要求卡片与消息列严格同宽（884px @1280），改为在 `@container room (max-width: 1136px)`
+把活动栏落到卡片下方、dock 回到 `var(--column)`；这会把「谁在跑」从操作条同行移走，需重新验收 `timeline-actions` 几何。
+
+完成标准：`npm run typecheck`、`npm run build` 通过；1280×800 实测卡片 816px、`＋ 工作目录` 可见、
+路径已折叠、无横向滚动；1600×1000 与改动前逐像素一致；900/760/560 三档仍能看到 24px 圆形加号且 `aria-label` 非空。
+
+## D-045：多窗格 = 同一实时状态的多个镜片投影
+
+触发证据：用户截图 `PixPin_2026-11-18_18-05-39.png`——一个房间、6 个 Agent、一条阅读列；用户描述
+「多 Agent 同时工作时不方便同时观看，因为一个对话会不断往上滚动对话历史」，并要求参考 Cherry Studio
+的「多窗口并列 / 四方格」。核对实现：`/` 只有一条 EventSource、一份 `state`、一个 `#timeline`；
+`@all` 的 6 路 `turn.content.delta` 交错追加，`appendTimeline()` 每次都贴底，盯住 A 会被 B 的增量顶走。
+横向事实：Cherry Studio 2.x 的多窗口是**多个独立 App 实例**（Electron 窗口/标签），其仓库 issue #15258
+（Agent 模式多会话平铺）关闭未做；Sideview 最多 4 个对话并列、Plexus 最多 6 个会话并列并建议
+「同一会话看两个 Agent 就拆 Agents 标签」。结论：并列是观测需求，粒度由拓扑决定；本仓库最自然的粒度是
+**会话内的 Agent 车道**，跨目录交给浏览器窗口。
+
+决定：
+
+1. **一个页面仍是一条 SSE、一份 `state`、一个活纪元。** 窗格是只读投影（镜片 `room` 或
+   `agent:<actorId>`），不新增网络连接、不新增 Turn 状态、不新增输入器、不新增审批/权限/协议/存储。
+2. **窗格数量 1/2/3/4/5/6，六轨 grid + 跨列计划**：`[6]` / `[3,3]` / `[3,3,6]` / `[3,3,3,3]` /
+   `[2,2,2,3,3]` / `[2,2,2,2,2,2]`。列数只由窗格数决定（`paneColumns`），不按宽度猜。
+3. **渲染上下文可变。** `PaneContext` 持有 `timeline`、四张节点表、follower、trim/date/jump 标量；
+   `usePaneContext()` 切换模块级别名（渲染函数体不改算法）。dispatch 分两层：
+   **全局副作用只跑一次**（`state.messages`、`trackTurnEnvelope()` 的 `state.turns` / 完成跃迁 / 终态 delta 清理、
+   活动栏、记忆列表、未读、`context.reset`、session 事件），再逐格 `lensAccepts()` + `paintEnvelope()`；结束后恢复主格。
+   Turn 状态必须属于全局层：4 个窗格全是 Agent 车道时，未上屏的 Turn 仍要进入忙碌锁与活动栏。
+4. **车道过滤按 target 而不是按 sender。** 终态事件不带 `targetActorId`、`turn.interrupted` 的 actor 是
+   `system`；`resolveTurnTarget()` 依次取 `body.targetActorId` → `state.turns` → `envelope.to` → actor。
+   车道收：用户消息 + 本 Agent 的 `turn.*` / delta / `tool.progress*`；不收其他 Agent、监督、助理派活、
+   记忆活动、session。用户消息在车道折叠为一行 `<details>`（全文 + 回复/复制在展开态）。
+5. **回填日志有界 300 条**（只存可见、非 delta 的 `{envelope, targetActorId}`）。新建窗格、切镜片、
+   1→4/6 格时按日志重放；每格 DOM 仍按 500 条裁剪。日志丢的只是「新建窗格能回看多早」，
+   不影响任何格的实时增量。
+6. **持久化 `localStorage["aichatlink:panes"]`**。解析失败/越界夹到 1..6 并补 `room`；`renderAgents()` 后对账：
+   名册里不存在的 Agent **回落 `room` 并写回**，已停用的保留（可看历史输出）。不写 URL/DB/配置。
+7. **基线零回归。** `count === 1 && lens === room` → `html[data-panes="single-room"]`：窗格头与格线隐藏，
+   既有 `#timeline-actions`（对话目录 + 浮标）与 composer 几何不变。其余模式隐藏既有浮标栈，
+   每格头部 `↓ N` 接管。
+8. **滚动：每格独立 follower；多格下取消「滚回底部自动恢复跟随」。** 实测 4 格时，程序化跟随产生的
+   延迟 `scroll` 事件会在用户 wheel 暂停之后到达，`isNearBottom()` 为真 → `resume(false)`，把阅读中的格子
+   重新贴底。暂停后只通过该格 `↓` 或自己发送恢复；自己发送只恢复主格。这是对 WEB_UI §九 的一次修订。
+9. **不做跨 workspace / 跨对话同屏。** 一页只有一个活纪元与一条 seq 游标（D-040 的整页重载语义）。
+   跨目录用浏览器窗口（每窗口天然一条 SSE，仍在 HTTP/1.1 同源 6 连接预算内），对话框提供
+   「在新窗口打开当前目录」。
+
+被否决的方案：
+
+| 方案 | 否决理由 |
+| :--- | :--- |
+| 每格一个 `<iframe src="/?ws=…">` | 每格 = 一个完整 App = 一条**永久 SSE**；4 格 5 条、6 格 7 条，超过 HTTP/1.1 同源 6 连接上限，后续 `/api/messages` 会排队超时；Node `http` 无 HTTP/2 |
+| 每格一个 `AIChatLinkRuntime` | 4 个 runtime × 6 个 native CLI = 24 个会话；内存/端口/启动时间与「同房间 6 Agent」语义都不成立 |
+| 把 6 个 Agent 拆成 6 个对话 | 破坏 D-009 的同房间并行、`@all`、监督配对与共享上下文 |
+| 只加 CSS `column-count` | 列按 DOM 顺序均衡，不按 actor 归类，交错问题原样保留 |
+| 每格第二个输入器 / 第二份 Turn 状态 | 忙碌锁与目标选择会出现 N 份，违反 D-044 的单一事实源 |
+
+原因：用户要的是「同时看每个 Agent 在干什么」，不是「同时开 N 个房间」。在房间拓扑下，
+一条 SSE + 一份 state + N 个投影既满足观测，又不把网络、进程、锁成倍放大；跨目录的窗口需求由浏览器
+窗口正交满足。
+
+变更条件：若将来 `web/server` 支持 HTTP/2，或 SSE 改为单连接多路复用（一条流携带多个 workspace），
+可重新评估 iframe/跨目录窗格；若要窗格内分别发送，必须先改 D-044 的单一忙碌锁语义并重新验收；
+若要「拖动分隔条 / 窗格最大化」，需要新增每格像素比例与布局栈，不能复用本次的 count+span 方案。
+
+完成标准：`npm run typecheck`、`npx vitest run`（763 项，含新增 `web/pane-lens` 10 项）、`npm run build`
+全通过；`/pane-lens.js`、`/pane-view.js` 200；真实实例（4311，6 个 pi Agent）4 格 + 3 Agent 真实回合
+车道过滤精确、忙碌锁一次解锁；暂停车道在别人增长时 `scrollTop` 不变且 `↓` 角标计数、点击回底；
+1/4/5/6 格在 1600/1280 的 span 与 rect 符合 D-045；430 单列无横向滚动；`context.reset` 清空所有格；
+`?conv=` 4 格回放不锁输入器；名册缺失 Agent 回落 room 并写回；基线单格截图与 D-044 一致。
 
 ## 决策变更规则
 

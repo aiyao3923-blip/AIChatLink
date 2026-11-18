@@ -164,7 +164,11 @@ binding 是 provenance/correlation handle，不是 secret、token 或本机抗�
 | T-018 | delivered attempt 对账失败 | terminal 可为 interrupted，但 `delivery_certainty` 保留 delivered，不倒退 unknown |
 | T-019 | runtime 优雅停止/重载 | shutdown 先令 HTTP draining 并等待当前 REST，再关闭 Broker/session/Store；listener 在旧 Store writer 与原生 session 收敛前不释放，CLI 连续确认不可达后才报告停止，且仅 `restart` 启动替代 runtime；恢复仍遵守无自动 replay |
 | T-020 | 旧对话续聊 | `POST /api/conversations/resume` 只接受已关闭对话（`active` 返回 `INVALID_ENVELOPE`、未知 id 返回 `UNKNOWN_TARGET`）；同 `clientCommandId` 单飞并重放结果；写一条带续聊种子的 `context.reset`，不改写、不移动、不删除任何 event；链式续聊的种子起点仍回到最初那段对话 |
-| T-021 | 空纪元不投影 | 连续 reset（或 reset 后立刻续聊）留下的已关闭纪元只含 `context.reset` 事件、没有房间消息，因此不出现在 `/api/conversations`；活动纪元始终出现，保证「新对话已开始」的空态；边界与 `seq` 本身不变 |
+| T-021 | 空纪元不投影 | 连续 reset（或 reset 后立刻续聊）留下的已关闭纪元只含 `context.reset` 事件、没有房间消息，因此不出现在 `/api/conversations`；活动纪元始终出现并带 `empty:true`（保证「新对话已开始」的空态与 live 边界），侧栏不把它渲染成 `对话 N`；边界与 `seq` 本身不变 |
+| T-022 | 删除对话需确认 | 侧栏删除图标触发确认框，文案说明「本地数据库永久删除、不可恢复、记忆不删」；取消不发请求、不改按钮；确认后才调用 `POST /api/conversations/delete`（严格 `{clientCommandId, conversationId, resetNativeSessions?}`） |
+| T-023 | 删除即清除 | 删除已关闭对话：该区间 `events` / `turns` / `turn_attempts` / dated-memory 源 / 覆盖 summary 消失，`foreign_key_check` 为空、`integrity_check=ok`，记忆内容保留而 `source_event_id` 置空，rollup pending 计数重算；`context_resets` 边界与 `seq` 不重编号；同 `clientCommandId` 重放同一结果 |
+| T-024 | 删除活动对话 | 先 reset（写 `context.reset`、`resetNativeSessions` 默认 `true` 时重启全部原生会话）再清除旧区间；房间剩一个 `empty:true` 的开放纪元且只有 reset 事件；有 `queued/running` 回合时返回 `INVALID_ENVELOPE` 且不改数据 |
+| T-025 | 删空目录不再跳回 | 某工作目录的对话全部删除后，侧栏显示「这个工作目录还没有对话」；点该目录组头只打开空时间线（`recentEvents` 里已无被删事件），不会重放最后一个已删对话 |
 
 ## 9. Native interaction fail-closed
 

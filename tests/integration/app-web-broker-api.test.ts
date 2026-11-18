@@ -88,6 +88,11 @@ function brokerFixture(): AIChatLinkWebBrokerApiOptions["broker"] {
       compactable: false
     }),
     listConversations: () => [],
+    deleteConversationFromBinding: async () => ({
+      conversationId: "conv:1",
+      deletedEvents: 3,
+      deletedTurns: 1
+    }),
     resumeConversationFromBinding: async () => ({
       reset: true,
       throughSeq: 20,

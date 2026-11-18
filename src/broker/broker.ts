@@ -53,6 +53,8 @@ import type {
   CancelTurnFromBindingInput,
   CancelTurnOutcome,
   CompactContextFromBindingInput,
+  DeleteConversationFromBindingInput,
+  DeleteConversationFromBindingResult,
   ResetContextFromBindingInput,
   ResumeConversationFromBindingInput,
   SupervisionStatusQuery,
@@ -204,6 +206,10 @@ export class AIChatLinkBroker {
   readonly #resetCommandFlights = new Map<
     string,
     Promise<import("../memory/types.js").RoomContextResetResult>
+  >();
+  readonly #deleteCommandFlights = new Map<
+    string,
+    Promise<DeleteConversationFromBindingResult>
   >();
   readonly #turnWaiters = new Map<string, Set<() => void>>();
   readonly #milestoneWaiters = new Map<string, Set<(milestone: SupervisionMilestone) => void>>();
@@ -383,15 +389,19 @@ export class AIChatLinkBroker {
         startSeq - 1,
         endSeq === null ? undefined : endSeq
       );
+      const hasMessages =
+        first !== undefined ||
+        this.#store.hasRoomContextMessage(
+          roomId,
+          startSeq - 1,
+          endSeq === null ? undefined : endSeq
+        );
       // A closed epoch with no room-context message is a boundary artifact:
       // two resets in a row, or a reset immediately followed by a resume. There
       // is no transcript to show, so it does not become a conversation. The
-      // active epoch is always listed so an empty new conversation stays visible.
-      if (
-        endSeq !== null &&
-        first === undefined &&
-        !this.#store.hasRoomContextMessage(roomId, startSeq - 1, endSeq)
-      ) {
+      // open epoch stays in the list (it carries the live epoch start) but is
+      // flagged `empty`, so the sidebar only shows it once it has content.
+      if (endSeq !== null && !hasMessages) {
         continue;
       }
       const sourceTitle =
@@ -415,6 +425,7 @@ export class AIChatLinkBroker {
         endSeq,
         startedAt,
         active: endSeq === null,
+        empty: !hasMessages,
         resumedFrom:
           resume === undefined
             ? null
@@ -565,6 +576,143 @@ export class AIChatLinkBroker {
       if (this.#resetCommandFlights.get(commandKey) === flight) {
         this.#resetCommandFlights.delete(commandKey);
       }
+    }
+  }
+
+  /**
+   * Permanently deletes one conversation. The open epoch is closed with a
+   * normal reset first, so the agents' native sessions restart fresh and the
+   * room keeps exactly one (empty) open epoch afterwards.
+   */
+  async deleteConversationFromBinding(
+    input: DeleteConversationFromBindingInput
+  ): Promise<DeleteConversationFromBindingResult> {
+    this.#assertOpen();
+    if (!this.#contextController) {
+      throw new AIChatLinkError("SESSION_NOT_AVAILABLE", "Room context controller is unavailable");
+    }
+    const roomId = input.roomId ?? this.#defaultRoomId;
+    const resetNativeSessions = input.resetNativeSessions !== false;
+    // The receipt is looked up first: once a delete completed, its conversation
+    // no longer exists, and a retry must still replay the stored result.
+    const command = this.#store.beginClientCommand<DeleteConversationFromBindingResult>({
+      sourceBindingId: input.bindingId,
+      clientCommandId: input.clientCommandId,
+      commandType: "conversation.delete",
+      canonicalPayload: {
+        roomId,
+        conversationId: input.conversationId,
+        resetNativeSessions
+      },
+      acceptedAt: this.#clock.now()
+    });
+    if (command.disposition === "replayed") return command.result;
+
+    const target = this.listConversations(roomId).find(
+      (conversation) => conversation.conversationId === input.conversationId
+    );
+    if (!target) {
+      throw new AIChatLinkError("UNKNOWN_TARGET", "Conversation does not exist", {
+        conversationId: input.conversationId
+      });
+    }
+    const inFlight = this.#store
+      .listTurns()
+      .filter((turn) => !TERMINAL_TURN_STATUSES.has(turn.status));
+    if (inFlight.length > 0) {
+      throw new AIChatLinkError(
+        "INVALID_ENVELOPE",
+        "A conversation cannot be deleted while turns are queued or running",
+        { conversationId: input.conversationId, pendingTurns: inFlight.length }
+      );
+    }
+
+    const commandKey = JSON.stringify([input.bindingId, input.clientCommandId]);
+    const existingFlight = this.#deleteCommandFlights.get(commandKey);
+    if (existingFlight) return existingFlight;
+    const flight = this.#completeDeleteCommand({
+      ...input,
+      roomId,
+      target,
+      resetNativeSessions
+    });
+    this.#deleteCommandFlights.set(commandKey, flight);
+    try {
+      return await flight;
+    } finally {
+      if (this.#deleteCommandFlights.get(commandKey) === flight) {
+        this.#deleteCommandFlights.delete(commandKey);
+      }
+    }
+  }
+
+  async #completeDeleteCommand(
+    input: DeleteConversationFromBindingInput & {
+      roomId: string;
+      target: ConversationSummary;
+      resetNativeSessions: boolean;
+    }
+  ): Promise<DeleteConversationFromBindingResult> {
+    try {
+      let throughSeq = input.target.endSeq;
+      if (throughSeq === null) {
+        // Closing the open epoch keeps the native-session contract: a deleted
+        // conversation must not stay alive inside an agent's process.
+        const reset = this.#contextController!.resetNow(input.roomId, input.resetNativeSessions);
+        if (reset.reset) {
+          const event = this.#store.appendDurableEvent({
+            roomId: input.roomId,
+            eventType: "context.reset",
+            actorId: BUILTIN_ACTORS.system.actorId,
+            targets: [],
+            correlationId: createCorrelationId(),
+            occurredAt: this.#clock.now(),
+            body: {
+              throughSeq: reset.throughSeq,
+              resetNativeSessions: input.resetNativeSessions
+            },
+            provenance: {
+              sourceKind: "operator",
+              labels: ["context-reset", "conversation-delete"]
+            }
+          });
+          await this.#publishStored(event);
+          if (input.resetNativeSessions && this.#agentController) {
+            for (const adapter of this.#adapters.list()) {
+              const controller = this.#agentController;
+              if (controller.restartFresh !== undefined) {
+                await controller.restartFresh(adapter.actorId);
+              } else {
+                await controller.restart(adapter.actorId);
+              }
+            }
+          }
+        }
+        throughSeq = reset.throughSeq;
+      }
+      const purged = this.#store.purgeConversationRange({
+        roomId: input.roomId,
+        fromSeq: input.target.startSeq,
+        throughSeq
+      });
+      if (this.#storeWritesFenced) {
+        throw new AIChatLinkError(
+          "SESSION_NOT_AVAILABLE",
+          "Broker closed before the delete receipt was persisted"
+        );
+      }
+      return this.#store.completeClientCommand({
+        sourceBindingId: input.bindingId,
+        clientCommandId: input.clientCommandId,
+        result: {
+          conversationId: input.target.conversationId,
+          deletedEvents: purged.deletedEvents,
+          deletedTurns: purged.deletedTurns
+        }
+      });
+    } catch (error) {
+      this.#report(error, { operation: "context" });
+      throw error;
     }
   }
 

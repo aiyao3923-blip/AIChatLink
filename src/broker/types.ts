@@ -200,6 +200,20 @@ export interface ResumeConversationFromBindingInput {
   resetNativeSessions?: boolean;
 }
 
+export interface DeleteConversationFromBindingInput {
+  bindingId: string;
+  clientCommandId: string;
+  conversationId: string;
+  roomId?: string;
+  resetNativeSessions?: boolean;
+}
+
+export interface DeleteConversationFromBindingResult {
+  conversationId: string;
+  deletedEvents: number;
+  deletedTurns: number;
+}
+
 export interface SupervisionStatusQuery {
   pairId?: string;
   correlationId?: string;

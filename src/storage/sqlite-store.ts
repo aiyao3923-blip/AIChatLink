@@ -62,6 +62,8 @@ import type {
   MutateMemoryInput,
   RecoveryResult,
   RecordAgentDatedMemoryRollupFailureInput,
+  PurgeConversationRangeInput,
+  PurgeConversationRangeResult,
   ReplaceRoomSummaryInput,
   RoomBootstrapSnapshot,
   RuntimeRecoveryResult,
@@ -4552,6 +4554,220 @@ export class SqliteAIChatLinkStore implements AIChatLinkStore {
       occurredAt: requiredString(row.occurred_at, "occurred_at"),
       content
     };
+  }
+
+  /**
+   * Deletes one conversation epoch and everything that hangs off its seq range.
+   *
+   * AIChatLink treats the transcript as append-only for *reads and replay*, but
+   * an operator-confirmed delete must not keep the text on disk. `seq` is
+   * monotonic and not contiguous: surviving events keep their numbers, so every
+   * cursor still compares by `>` and nothing is renumbered.
+   *
+   * Memory is a separate data class: memory/identity records survive, only the
+   * provenance pointer into the deleted events is cleared. Summaries cover the
+   * range verbatim, so those rows go.
+   */
+  purgeConversationRange(input: PurgeConversationRangeInput): PurgeConversationRangeResult {
+    this.#assertOpen();
+    if (input.roomId.trim().length === 0) {
+      throw new AIChatLinkError("INVALID_ENVELOPE", "roomId must not be blank");
+    }
+    if (!Number.isSafeInteger(input.fromSeq) || input.fromSeq < 1) {
+      throw new AIChatLinkError("INVALID_ENVELOPE", "fromSeq must be a positive integer");
+    }
+    if (!Number.isSafeInteger(input.throughSeq) || input.throughSeq < input.fromSeq) {
+      throw new AIChatLinkError(
+        "INVALID_ENVELOPE",
+        "throughSeq must be an integer that does not precede fromSeq"
+      );
+    }
+    const { roomId, fromSeq, throughSeq } = input;
+
+    return this.#withImmediateTransaction(() => {
+      const database = this.#database;
+      const count = (table: string): number =>
+        Number((database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as Row).count);
+      // Temp tables keep the doomed row sets stable across the ordered deletes;
+      // every FK edge into `events`/`turns` has to be cut before the row goes.
+      for (const table of ["purge_event", "purge_turn", "purge_pair", "purge_rollup"]) {
+        database.exec(`DROP TABLE IF EXISTS temp.${table}`);
+      }
+      database.exec("CREATE TEMP TABLE purge_event(event_id TEXT PRIMARY KEY)");
+      database.exec("CREATE TEMP TABLE purge_turn(turn_id TEXT PRIMARY KEY)");
+      database.exec("CREATE TEMP TABLE purge_pair(pair_id TEXT PRIMARY KEY)");
+      database.exec(
+        "CREATE TEMP TABLE purge_rollup(room_id TEXT, actor_id TEXT, local_date TEXT, PRIMARY KEY(room_id, actor_id, local_date))"
+      );
+
+      database
+        .prepare(`
+          INSERT INTO purge_event(event_id)
+          SELECT event_id FROM events WHERE room_id = ? AND seq BETWEEN ? AND ?
+        `)
+        .run(roomId, fromSeq, throughSeq);
+      // A fan-out turn is the child of the turn that opened it: the parent FK
+      // would block the delete, so descendants are pulled in as well.
+      database
+        .prepare(`
+          INSERT OR IGNORE INTO purge_turn(turn_id)
+          SELECT turn_id FROM turns
+          WHERE source_event_id IN (SELECT event_id FROM purge_event)
+             OR queued_event_id IN (SELECT event_id FROM purge_event)
+             OR response_event_id IN (SELECT event_id FROM purge_event)
+             OR terminal_event_id IN (SELECT event_id FROM purge_event)
+        `)
+        .run();
+      for (;;) {
+        const inserted = database
+          .prepare(`
+            INSERT OR IGNORE INTO purge_turn(turn_id)
+            SELECT child.turn_id FROM turns AS child
+            JOIN purge_turn AS parent ON child.parent_turn_id = parent.turn_id
+          `)
+          .run();
+        if (Number(inserted.changes) === 0) break;
+      }
+      // A Turn can outlive its epoch (a reset landed while it was running, or a
+      // fan-out child was queued after the boundary). Its own lifecycle events
+      // belong to the same doomed set even though they sit after the range.
+      database
+        .prepare(`
+          INSERT OR IGNORE INTO purge_event(event_id)
+          SELECT event_id FROM events
+          WHERE room_id = ?
+            AND NOT (seq BETWEEN ? AND ?)
+            AND json_extract(
+                  CASE WHEN json_valid(body_json) THEN body_json ELSE '{}' END,
+                  '$.turnId'
+                ) IN (SELECT turn_id FROM purge_turn)
+        `)
+        .run(roomId, fromSeq, throughSeq);
+      const deletedEvents = count("purge_event");
+      database
+        .prepare(`
+          INSERT OR IGNORE INTO purge_pair(pair_id)
+          SELECT pair_id FROM supervision_pairs
+          WHERE source_event_id IN (SELECT event_id FROM purge_event)
+             OR watch_event_id IN (SELECT event_id FROM purge_event)
+             OR pair_event_id IN (SELECT event_id FROM purge_event)
+        `)
+        .run();
+      database
+        .prepare(`
+          INSERT OR IGNORE INTO purge_rollup(room_id, actor_id, local_date)
+          SELECT room_id, actor_id, local_date FROM agent_dated_memory_sources
+          WHERE turn_id IN (SELECT turn_id FROM purge_turn)
+             OR source_event_id IN (SELECT event_id FROM purge_event)
+             OR response_event_id IN (SELECT event_id FROM purge_event)
+        `)
+        .run();
+
+      // Children first: every table below holds a FK into `turns` or `events`.
+      database
+        .prepare(`
+          DELETE FROM supervision_pair_turns
+          WHERE turn_id IN (SELECT turn_id FROM purge_turn)
+             OR pair_id IN (SELECT pair_id FROM purge_pair)
+        `)
+        .run();
+      database
+        .prepare(
+          "DELETE FROM supervision_steer_counts WHERE subject_turn_id IN (SELECT turn_id FROM purge_turn)"
+        )
+        .run();
+      database
+        .prepare(`
+          DELETE FROM agent_dated_memory_sources
+          WHERE turn_id IN (SELECT turn_id FROM purge_turn)
+             OR source_event_id IN (SELECT event_id FROM purge_event)
+             OR response_event_id IN (SELECT event_id FROM purge_event)
+        `)
+        .run();
+      database
+        .prepare("DELETE FROM turn_attempts WHERE turn_id IN (SELECT turn_id FROM purge_turn)")
+        .run();
+      database
+        .prepare("DELETE FROM supervision_pairs WHERE pair_id IN (SELECT pair_id FROM purge_pair)")
+        .run();
+      // Memory records keep their content (a distinct data class); only the
+      // pointer into the removed transcript is cleared.
+      database
+        .prepare(
+          "UPDATE memory_records SET source_event_id = NULL WHERE source_event_id IN (SELECT event_id FROM purge_event)"
+        )
+        .run();
+      database
+        .prepare(
+          "UPDATE identity_records SET source_event_id = NULL WHERE source_event_id IN (SELECT event_id FROM purge_event)"
+        )
+        .run();
+      database
+        .prepare(
+          "UPDATE events SET reply_to_event_id = NULL WHERE reply_to_event_id IN (SELECT event_id FROM purge_event)"
+        )
+        .run();
+      // A summary that covered the deleted range would keep its text verbatim.
+      database
+        .prepare("DELETE FROM summaries WHERE room_id = ? AND from_seq <= ? AND through_seq >= ?")
+        .run(roomId, throughSeq, fromSeq);
+      const deletedTurns = count("purge_turn");
+      database.prepare("DELETE FROM turns WHERE turn_id IN (SELECT turn_id FROM purge_turn)").run();
+      database
+        .prepare("DELETE FROM events WHERE room_id = ? AND event_id IN (SELECT event_id FROM purge_event)")
+        .run(roomId);
+      // Rollup counters are a pending-work projection; recompute them from the
+      // sources that survived so the dated-memory worker never sees a phantom.
+      const updatedAt = nowIso();
+      database
+        .prepare(`
+          UPDATE agent_dated_memory_rollups AS rollup
+          SET pending_turns = (
+                SELECT COUNT(*) FROM agent_dated_memory_sources AS source
+                WHERE source.room_id = rollup.room_id
+                  AND source.actor_id = rollup.actor_id
+                  AND source.local_date = rollup.local_date
+                  AND source.processed_at IS NULL
+              ),
+              pending_chars = COALESCE((
+                SELECT SUM(source.source_chars) FROM agent_dated_memory_sources AS source
+                WHERE source.room_id = rollup.room_id
+                  AND source.actor_id = rollup.actor_id
+                  AND source.local_date = rollup.local_date
+                  AND source.processed_at IS NULL
+              ), 0),
+              pending_through_seq = (
+                SELECT MAX(source.response_seq) FROM agent_dated_memory_sources AS source
+                WHERE source.room_id = rollup.room_id
+                  AND source.actor_id = rollup.actor_id
+                  AND source.local_date = rollup.local_date
+                  AND source.processed_at IS NULL
+              ),
+              first_pending_at = (
+                SELECT MIN(source.terminal_at) FROM agent_dated_memory_sources AS source
+                WHERE source.room_id = rollup.room_id
+                  AND source.actor_id = rollup.actor_id
+                  AND source.local_date = rollup.local_date
+                  AND source.processed_at IS NULL
+              ),
+              last_pending_at = (
+                SELECT MAX(source.terminal_at) FROM agent_dated_memory_sources AS source
+                WHERE source.room_id = rollup.room_id
+                  AND source.actor_id = rollup.actor_id
+                  AND source.local_date = rollup.local_date
+                  AND source.processed_at IS NULL
+              ),
+              updated_at = ?
+          WHERE (rollup.room_id, rollup.actor_id, rollup.local_date)
+            IN (SELECT room_id, actor_id, local_date FROM purge_rollup)
+        `)
+        .run(updatedAt);
+
+      for (const table of ["purge_event", "purge_turn", "purge_pair", "purge_rollup"]) {
+        database.exec(`DROP TABLE IF EXISTS temp.${table}`);
+      }
+      return { deletedEvents, deletedTurns };
+    });
   }
 
   getSupervisionTurnRole(turnId: string): SupervisionTurnRole | undefined {
