@@ -362,7 +362,7 @@ Broker 指标不含模型网络/推理；只测 Structured session startup/reuse
 | 构建与类型 | `npx tsc -p tsconfig.json --noEmit`、`npm run build` | 通过 |
 | 全量回归 | `npx vitest run` | 69 files / 725 tests 通过 |
 | 命令探测 | `aichatlink doctor` | codex 0.167.2、grok 1.0.34、claude 2.1.295、pi 0.99.2、workbuddy 2.165.0；kimi/hermes 未安装 |
-| pi 真实回合 | 临时房间（port 4311，driver=pi，model=newapi/deepseek-v4.1-flash） | `ROOM-PI-OK`，`turn.completed` |
+| pi 真实回合 | 临时房间（port 4311，driver=pi，model=<provider>/<model>） | `ROOM-PI-OK`，`turn.completed` |
 | pi MCP 实调 | 同一房间，要求调用 `mcp__aichatlink__read` | `tool.started/completed` 成对，回复 `MCP-READ-OK` |
 | pi 隔离与清理 | 房间停止后检查 `.aichatlink/pi-agents/pi-native/` | 只剩 `sessions/`，生成的 models/settings/mcp/auth 已删除 |
 | WorkBuddy 握手 | 真实 `codebuddy-lite-wb.mjs` + `WorkBuddyCliAdapter` | `start()` ready；首帧 `permissionMode=bypassPermissions`；`access.unrestricted` 由 `advertised` 升为 `probed` |

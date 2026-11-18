@@ -520,7 +520,7 @@ Hermes 0.20.1 的 initialize 当前未声明 `mcpCapabilities.http`，但官方�
 
 变更条件：若某驱动后续通过自己的协议暴露模型选择（例如 ACP `session/set_model`），应优先用原生协议并在同一矩阵登记；若要支持「房间内临时切换后跨重启保留」，需要区分 setup 值与 `/model` 快照的优先级（当前为 setup 值优先）。
 
-完成标准：`npm run typecheck`、全量测试、构建通过；`/api/setup` 返回每 Agent 目录且不含密钥；pi 角色在 setup 中选择 `newapi/gemini-3.8-flash` 后重启，`/state` 与 `--model` 一致并能完成回合；Claude/Codex argv 单测通过；目标弹层可开/关、外部点击与 Escape 关闭；`/api/context` 显示 1,000,000。
+完成标准：`npm run typecheck`、全量测试、构建通过；`/api/setup` 返回每 Agent 目录且不含密钥；pi 角色在 setup 中选择 `<provider>/<model-b>` 后重启，`/state` 与 `--model` 一致并能完成回合；Claude/Codex argv 单测通过；目标弹层可开/关、外部点击与 Escape 关闭；`/api/context` 显示 1,000,000。
 
 ## D-034：对话列表由 context reset 纪元投影，新对话重启原生 session
 

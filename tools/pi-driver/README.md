@@ -52,11 +52,11 @@ node dist/src/cli.js start --no-open     # 或 aichatlink start
   "version": 1,
   "roles": {
     "pi-architect": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
-      "providers": ["newapi"],
+      "providers": ["<provider>"],
       "contextFiles": false
     }
   }
@@ -95,8 +95,8 @@ AIChatLink 会在用户文本前拼房间上下文包，垫片只按 `[current_m
 ```
 [host_agent]
 role=pi-architect
-provider=newapi
-model=deepseek-v4.1-flash
+provider=<provider>
+model=<model>
 thinking=high
 ```
 
@@ -148,13 +148,13 @@ node tools/pi-driver/dev/room.mjs send-all "同一个问题"
 node tools/pi-driver/dev/interrupt-test.mjs                # R12：打断 < 10 s
 ```
 
-已在本机实测通过（2026-11-16，AIChatLink 0.1.16 / pi 0.99.2 / deepseek-v4.1-flash）：
+已在本机实测通过（2026-11-16，AIChatLink 0.1.16 / pi 0.99.2 / <model>）：
 
 | 能力 | 证据 |
 | :--- | :--- |
 | 单角色成回合 | `turn.started → message.created → turn.completed` |
 | 工具闭环 | `tool.started / tool.completed` 成对，`status:"completed"` |
-| 中途换模型 | `/state` 返回 `model=newapi/kimi-k3.1-pro`，`messages=25` |
+| 中途换模型 | `/state` 返回 `model=<provider>/<model-c>`，`messages=25` |
 | 上下文保留 | 换模型 + 运行时重启后仍答出旧暗号 `紫色-42` |
 | MCP 互查 | pi 侧出现 `mcp__aichatlink__*`，`read` 返回 `seq 89..92` |
 | 三角色并发 | 一条消息三个 target，三路各自 `completed` |

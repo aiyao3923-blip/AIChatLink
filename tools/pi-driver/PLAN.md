@@ -28,9 +28,9 @@
 | AIChatLink | 0.1.16 / HEAD `7c3aa9c` / 最后提交 2026-08-20 / **无 LICENSE** | `git log`、`ls` |
 | pi | 0.99.2，bin `dist/bundle/cli.js` | `package.json` |
 | pi RPC | `--mode rpc`，JSONL；stdout 仅协议，stderr 日志 | 实验 E0 |
-| 默认模型 | `newapi/deepseek-v4.1-flash`（自定义 provider，`api.luomx.com`） | `get_state` |
+| 默认模型 | `<provider>/<model>`（自定义 provider，`<provider-endpoint>`） | `get_state` |
 | 模型上限 | context 1M / max-out 1M / thinking **仅 `off` 与 `xhigh` 有效**，`minimal/low/medium/high` 被钳到 `xhigh` | 实验 E3 |
-| `~/.pi/agent/models.json` | **含 4 个明文 apiKey**（cline / newapi / wong / open） | 实验 E2 |
+| `~/.pi/agent/models.json` | **含 4 个明文 apiKey**（分属 4 个不同 provider） | 实验 E2 |
 | `~/.pi/agent/settings.json` | 13 个包扩展 + 1 个本地扩展 + `defaultThinkingLevel:"xhigh"` | 实验 E2 |
 | `~/.pi/agent/auth.json` | `{}`（无持久凭证） | 实验 E2 |
 | pi 冷启动（RPC 到 get_state） | **1.53 / 1.54 / 1.53 s**（3 次） | 实验 E1 |
@@ -294,7 +294,7 @@ pi --mode rpc（长驻，一角色一进程）
 | **R25** | `--thinking` 对某些模型被钳制 | 实验 E3：`minimal/low/medium/high` → `xhigh`；`off` 有效 | 省钱配置无效 | 角色选型时检查 `thinkingLevelMap`；冒烟用 `off` | `get_state` 实测 |
 | **R26** | 会话文件堆积在角色目录 | 实测 `sessions/` 由 pi 创建 | 磁盘增长 | README 提供清理脚本；不自动删 | 目录大小检查 |
 | **R27** | **REST 合同拒绝自定义 agent id** | `src/contracts/common.ts:85` `DEFAULT_KNOWN_TARGETS` 只有 5 个 id；`POST /api/messages {to:["agent:pi-architect"]}` → 404 `UNKNOWN_TARGET`（`claude-builder` 同样） | 房间 UI 根本发不出消息，多角色不可用 | **改 3 个文件**：`types.ts` 加 `knownTargets`、`server.ts` 透传并用于 messages/memory/identity 解析、`runtime.ts` 传入 adapters 的 actorId 列表 | S3 起所有消息均经 REST 成功 |
-| **R28** | 热切换模型可能撞 provider 角色兼容性 | 切到 `newapi/kimi-k3.1-pro` 后上游返回 `400 role 'developer' is not allowed`（pi 会话含 developer 角色） | 换模型后整轮失败 | 失败必须**显性**：垫片把 `stopReason:"error"` 映射为 `turn.failed`，不再落空消息；`stop_reason` 带上游错误；README 写明切回/换模型前 `/state` 核验 | seq 71/76 `turn.failed`；切回 deepseek 后 seq 87 正常 |
+| **R28** | 热切换模型可能撞 provider 角色兼容性 | 切到 `<provider>/<model-c>` 后上游返回 `400 role 'developer' is not allowed`（pi 会话含 developer 角色） | 换模型后整轮失败 | 失败必须**显性**：垫片把 `stopReason:"error"` 映射为 `turn.failed`，不再落空消息；`stop_reason` 带上游错误；README 写明切回/换模型前 `/state` 核验 | seq 71/76 `turn.failed`；切回 deepseek 后 seq 87 正常 |
 | **R29** | MCP `read` 是 correlation 作用域且 `afterSeq` 被静默钳制 | pi-reviewer 实测：`afterSeq` 0/74/84/86 都被钳到本轮 `89..92` | 不能把 `read` 当房间级历史视图 | 跨角色上下文靠 AIChatLink 注入的 `context packet`；`read` 只用于本 correlation / 新 correlation 主动拉取 | 房间内引用他人发言成功 |
 | **R30** | 原生 `stopReason:"error"` 曾被当成功 | 首版投影器只看 `agent_settled`，于是供应商 400 变成"空消息 + completed" | 静默失真：房间空白却显示成功 | `message_end` 分流 error → 聚合错误正文 + `is_error` 终局帧；`terminal` 标志保证一回合只终局一次 | 单测 2 项 + seq 71 |
 | **R31** | 斜杠指令曾被上下文包淹没 | AIChatLink 用 `contextPacket + "\n\n[current_message]\n" + content` 拼装；首版对整段做 `startsWith("/")` | `/model` 被当普通文本发给模型 | 只对 `[current_message]` 之后的内容判指令；新增 2 项单测 | seq 53/81 本地回执；seq 45/47 是修复前的反例 |
@@ -308,12 +308,12 @@ pi --mode rpc（长驻，一角色一进程）
 | **E0** | `get_state` over RPC，分离 stdout/stderr | exit 0；stdout 纯 JSONL；mcp 报错只在 stderr | ✅ RPC 可作干净数据流 |
 | **E1** | RPC 冷启动耗时 ×3 | 1543 / 1540 / 1532 ms | ✅ 远低于 15 s 握手超时（R14 原隐患解除） |
 | **E2** | 审计 `models.json` / `settings.json` / `auth.json` | 4 个明文 key；13 扩展；auth `{}` | ⚠️ 直接触发 v0.2 修订（R2/R23/R24） |
-| **E3** | `--thinking {minimal,off}` 对 `deepseek-v4.1-flash` | `minimal`→`xhigh`；`off`→`off`；map 显示仅 xhigh 有值 | ✅ 机制明确，角色用 `off` |
+| **E3** | `--thinking {minimal,off}` 对 `<model>` | `minimal`→`xhigh`；`off`→`off`；map 显示仅 xhigh 有值 | ✅ 机制明确，角色用 `off` |
 | **E6** | 隔离 agent-dir + 项目 MCP | 仅 aichatlink 加载；用户 4 server 全不加载 | ✅ 隔离方案成立（R1/R3/R14/R24 一并解决） |
 | **E7** | REST 目标白名单 | `agent:pi-architect` / `agent:claude-builder` → 404 `UNKNOWN_TARGET` | ❌ 推翻"零源码改动"（R27）；已打 3 文件补丁并 rebuild |
 | **E8** | 真机单角色（S3） | `turn.started → turn.reasoning.recorded → message.created → turn.completed`；回答内容正确 | ✅ 端到端闭环 |
 | **E9** | 工具三联（S4） | 4 次 `bash` 调用，`tool.started/tool.completed` 成对，`status:"completed"`；模型贴回真实 `pwd` | ✅ O4/O7/O8 正确 |
-| **E10** | 热切换 + 上下文（S5） | `/state` → `model=newapi/kimi-k3.1-pro, messages=25`；切回后仍答出暗号 `紫色-42`；切换模型触发 400 时落 `turn.failed` | ✅ 切换成立；同时暴露 R28/R30 |
+| **E10** | 热切换 + 上下文（S5） | `/state` → `model=<provider>/<model-c>, messages=25`；切回后仍答出暗号 `紫色-42`；切换模型触发 400 时落 `turn.failed` | ✅ 切换成立；同时暴露 R28/R30 |
 | **E11** | MCP 互查（S6） | pi 侧出现 `mcp__aichatlink__*`，`read` 返回 `seq 89..92, nextAfterSeq=92`；引用他人发言成功 | ✅ R17/R18 成立；同时暴露 R29 |
 | **E12** | 三角色并发（S7） | 一条消息三个 target，三路并行、各自 `completed`，产出互不相同 | ✅ E5 风险消除 |
 | **E13** | 打断（R12） | 取消后 **18 ms** 收敛为 `cancelled`（<10 s），下一轮正常 `OK` | ✅ R12 成立 |
@@ -329,7 +329,7 @@ pi --mode rpc（长驻，一角色一进程）
 | 需求 | 验证动作 | 通过标准 | 实测 |
 | :--- | :--- | :--- | :--- |
 | 多角色背后都是 pi | `/api/health` + 各角色 `get_state` | 3 个 pi agent ready，session id 互异 | ✅ 3 个 ready，`/state` 可读 |
-| 钉住模型 | 角色配置不同 model，各问一句 | 回复时 `get_state` 与配置一致 | ✅ `deepseek-v4.1-flash` |
+| 钉住模型 | 角色配置不同 model，各问一句 | 回复时 `get_state` 与配置一致 | ✅ `<model>` |
 | 中途切换 | 房间发 `/model <pattern>` | 下条回复用新模型，且能引用前文（上下文未丢） | ✅ E10 |
 | 上下文隔离 | 对 A 说"记住 42"，再问 B | B 不知；A 知 | ✅ A 记 `紫色-42`；B 无此上下文 |
 | 按需互查 | 让 A `read` 公共时间线 | 成功引用 B 的发言 | ✅ E11（注意 R29 作用域） |
@@ -392,7 +392,7 @@ pi --mode rpc（长驻，一角色一进程）
 （“零源码改动”在 REST 层不成立，见 R27）并已修复。
 
 ### 用户已拍板
-1. 冒烟模型：`newapi/deepseek-v4.1-flash` + `thinking: high`（实际被钳到 xhigh）；
+1. 冒烟模型：`<provider>/<model>` + `thinking: high`（实际被钳到 xhigh）；
 2. 角色工具：**全开**；
 3. 接受 v1 无独立 TUI；
 4. 密钥只留本地，不上传、不进模型上下文。

@@ -897,12 +897,12 @@ pi-designer｜设计
 {
   "version": 1,
   "roles": {
-    "pi-lead":       { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false },
-    "pi-architect":  { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false },
-    "pi-reviewer":   { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false },
-    "pi-contrarian": { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false },
-    "pi-verifier":   { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false },
-    "pi-designer":   { "model": "deepseek-v4.1-flash", "provider": "newapi", "thinking": "high", "tools": "all", "providers": ["newapi"], "contextFiles": false }
+    "pi-lead":       { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false },
+    "pi-architect":  { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false },
+    "pi-reviewer":   { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false },
+    "pi-contrarian": { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false },
+    "pi-verifier":   { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false },
+    "pi-designer":   { "model": "<model>", "provider": "<provider>", "thinking": "high", "tools": "all", "providers": ["<provider>"], "contextFiles": false }
   }
 }
 ```

@@ -2,62 +2,62 @@
   "version": 1,
   "roles": {
     "pi-lead": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     },
     "pi-architect": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     },
     "pi-reviewer": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     },
     "pi-contrarian": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     },
     "pi-verifier": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     },
     "pi-designer": {
-      "model": "deepseek-v4.1-flash",
-      "provider": "newapi",
+      "model": "<model>",
+      "provider": "<provider>",
       "thinking": "high",
       "tools": "all",
       "providers": [
-        "newapi"
+        "<provider>"
       ],
       "contextFiles": false
     }

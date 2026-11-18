@@ -7,14 +7,14 @@
 一个 Web UI，统一完成群聊路由、会话恢复、上下文压缩与本地记忆。
 
 ![Node](https://img.shields.io/badge/node-24.14.x-3c873a)
-![Tests](https://img.shields.io/badge/tests-739%20passing-0d9f6e)
+![Tests](https://img.shields.io/badge/tests-769%20passing-0d9f6e)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-0078d6)
 ![Transport](https://img.shields.io/badge/transport-structured-9440c9)
 ![License](https://img.shields.io/badge/license-MIT-2ea44f)
 
 <img src="./docs/assets/aichatlink-demo.gif" width="100%" alt="AIChatLink 本机界面：一个房间里四个 pi Agent 并排回答同一问题">
 
-<sub>本机界面实录：一个问题同时路由给四个 pi Agent，Broker 统一持久化每条回复、事件序号与路由信息。为了让仓库不含真实对话，画面中的问题与回答由仓库内的测试夹具驱动，读界面与交互则是本仓库构建的真实产物。</sub>
+<sub>本机多窗格实录：四格各绑定一个 pi Agent，同一个问题并行路由，四路回复分别落进各自窗格并同时持久化。为了让仓库不含真实对话，画面录制自一个隔离的本地演示房间（独立 SQLite 与工作目录、端口 4312）；界面与交互是本仓库构建的真实产物。</sub>
 
 </div>
 
@@ -130,7 +130,7 @@ aichatlink update                  # 更新当前全局安装
     },
     "pi": {
       "command": "pi",
-      "model": "newapi/deepseek-v4.1-flash",
+      "model": "<provider>/<model>",
       "thinking": "high",
       "piConfig": "shared",
       "enabled": false
