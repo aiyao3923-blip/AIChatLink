@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor } from "../../../web/empty-voice.js";
 
-const ROLE_NAMES = ["提案", "批判", "设计", "总管", "审查", "核验"] as const;
+const ROLE_NAMES = ["意图", "提案", "批判", "设计", "总管", "审查", "核验", "人话"] as const;
 
 describe("empty-pane voices", () => {
   it("gives every room role its own line, with or without a driver suffix", () => {

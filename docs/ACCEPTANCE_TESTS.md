@@ -251,7 +251,9 @@ binding 是 provenance/correlation handle，不是 secret、token 或本机抗�
 | W-017 | 房间工作目录 | `/setup` 顶部可选择/输入房间 `workspace`；保存后 `aichatlink.json` 只写 `workspace`，未覆盖的 Agent / 助理不写 `cwd`；主界面顶栏显示解析后路径末两段并链接回 `/setup` |
 | W-018 | 目录选择器 | `GET /api/setup/workspace` 只列目录、跳过点目录与 `node_modules`、标注 `.git`、超限截断；不可读/超时返回 400；`POST /api/setup/workspace/reveal` 缺 `x-aichatlink-setup: 1` 返回 400 |
 | W-019 | 目录继承生效 | 改 `workspace` 保存返回 `restartRequired=true`；重启后 `/api/bootstrap` 中各 Agent 的 `cwd` 等于 workspace，单个显式 `cwd` 仍覆盖 |
-| J-001 | 计划域名册 | `/setup` 与 `/api/bootstrap` 显示总管 + 提案 + 审查 + 批判 + 核验 + 设计六个计划域角色，不含实现/施工角色；身份每轮注入且稳定落在各自四段契约内 |
+| J-001 | 计划域名册 | `/setup` 与 `/api/bootstrap` 显示总管 + 意图 + 提案 + 审查 + 批判 + 核验 + 设计 + 人话八个计划域角色，不含实现/施工角色；身份每轮注入且稳定落在各自四段契约内 |
+| J-003 | 意图先行 | 含糊输入（主观词无数值 / 目标句无可观测对象）先由意图接手，**单轮只问 1 个问题**并带 2–3 个公选与后果；目标已可度量时直接放行、不占用提问；用户说「别问了」→ 记 SKIPPED-BY-USER 并开工 |
+| J-004 | 人话收尾 | 收尾由人话输出，首行是判定并带缺口计数（如「能用，但有 1 项没验证」）；`FAIL`/`NOT TESTED` 原样保留，不得改写成进行中或后续可补；正文 ≤24 行；总管不得在其后追加术语矩阵 |
 | J-002 | 总管统筹 | `@总管` 先分类，再用 AIChatLink 的 ask 叫至少一个专职（版式类问题应叫设计），最终输出四段综合；不替专职作答，不产出代码或补丁 |
 | W-016 | CLI runtime control | health 返回非秘密 `runtimeKey/runtimeScopeKey`；匹配的 `POST /api/runtime/shutdown` 返回 202，draining health 为 503 + identity；不匹配 scope 不触发关闭；端点不创建 durable command/event |
 | W-020 | 回到最新箭头 | 新气泡追加、正文/推理增量、工具进度长高都重新贴底；对话区内滚轮/触摸/指针/翻页键任一次操作即暂停且不自动恢复；离底部 >120px 时右下角圆形箭头出现（有无新气泡都出现），带新消息角标；点箭头或滚回底部后隐藏；箭头位于输入器上方，输入器变高时随之上移 |

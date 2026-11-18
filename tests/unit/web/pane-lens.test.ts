@@ -65,18 +65,20 @@ describe("pane lens persistence", () => {
 
 describe("pane layout plan", () => {
   it("uses one, two then three columns", () => {
-    expect([1, 2, 3, 4, 5, 6].map(paneColumns)).toEqual([1, 2, 2, 2, 3, 3]);
+    expect([1, 2, 3, 4, 5, 6, 7, 8].map(paneColumns)).toEqual([1, 2, 2, 2, 3, 3, 3, 3]);
   });
 
   it("fills whole rows on the six-track grid", () => {
-    const plans = [1, 2, 3, 4, 5, 6].map(paneSpans);
+    const plans = [1, 2, 3, 4, 5, 6, 7, 8].map(paneSpans);
     expect(plans).toEqual([
       [6],
       [3, 3],
       [3, 3, 6],
       [3, 3, 3, 3],
       [2, 2, 2, 3, 3],
-      [2, 2, 2, 2, 2, 2]
+      [2, 2, 2, 2, 2, 2],
+      [2, 2, 2, 2, 2, 2, 6],
+      [2, 2, 2, 2, 2, 2, 3, 3]
     ]);
     for (const spans of plans) {
       expect(spans.reduce((sum, span) => sum + span, 0) % PANE_TRACKS).toBe(0);

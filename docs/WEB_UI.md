@@ -112,7 +112,7 @@
 | 输入器 | 阅读列底部是一个 `.composer-dock`：左侧 `.composer` 是 `--paper` 卡片（1px 边 + `--shadow-1`，focus 时 `--shadow-2`），右侧 `.composer-agents` 是 30px 头像活动栏。dock 的宽度预算含活动栏：`min(--column-max, calc(100% - 48px))`，即宽度小于 1088px 时改用 24px 外边距、把活动栏的宽度记在面板的边距上，而不是从卡片里扣——否则卡片会被活动栏挤窄（1280×800 下曾从 884 掉到 768），连带把工作目录按钮挤出操作条。**操作条只有一行**：`发送给 @…` 右侧是 `＋ 工作目录 …/repo` 按钮（打开应用内 workspace 选择器，不再跳 `/setup`），右端是 `本条 N / 131072 字符` 与房间上下文估算（空草稿时整块隐藏，两者不是同一个数），状态槽平时为零宽、只承载错误与提交中反馈；提交确认「已接受，等待 Agent 事件」在该回合第一个 `turn.*` 事件或 Agent 消息进入视图时立即清空，若本地 SSE 已抢在 POST 响应之前送达则干脆不显示；收窄时按 meter → 路径文字 → 上下文估算 → 标签的顺序让步，但 `＋ 工作目录` 本身**永不隐藏**（≤700px 只显示 24px 圆形加号，`aria-label` 兜住名称） |
 | 忙碌态 | 当前主时间线（非回放）存在任一未终态 Turn 时，发送键的纸飞机换成 13px 旋转环并 `disabled`，`aria-busy="true"`，`title` 为「Agent 仍在工作；本轮结束后才能发送」；每个目标 Agent 头像外圈以 `--tone` 旋转。Turn 到终态后自动解锁；未知 status 按未结束处理（fail-safe）。POST 返回的 turns 先按 `seedOnly` 只写进 `state.turns` 上锁、不建卡片，避免 202 与 SSE 之间出现可再次发送的空窗，同时让卡片仍按 SSE 的 seq 顺序出现在用户消息之后。Enter 触发表单提交时走同一守卫，并在状态槽给出同一文案；本轮结束后该文案自动清空。 |
 | 完成点 | 只有 **live** 终态跃迁（非 replay/bootstrap）给头像加 7px 点：`completed` 用 `--accent`、`failed` 用 `--danger`、`cancelled/interrupted` 用 `--faint`。点图标跳到该 Agent 在本对话的最新可见回复并 1.4s 高亮；异常终态优先跳该 Turn 卡片。点图标、成功发送新消息、换对话或刷新即清；不写 localStorage/DB。 |
-| Agent 活动栏 | 只收 `enabled === true` 且 `status !== "pending_restart"` 的 Agent；按 actorId 排序，30px 圆，monogram 与顶栏同规则，tone 只染头像底与环。**两排网格，列数 `ceil(N/2)`，行优先**：6 个 Agent 为 3×2，5 个为 3+2，7 个为 4+3；6 个时宽约 106px，输入器不再被单排长条压窄。它不是第二名册：不显示名字、driver、重启/配置，只有工作环与完成点。`max-width: min(240px, 27%)`，列数超出时横向滚动、仍保持两排。 |
+| Agent 活动栏 | 只收 `enabled === true` 且 `status !== "pending_restart"` 的 Agent；按 actorId 排序，30px 圆，monogram 与顶栏同规则，tone 只染头像底与环。**两排网格，列数 `ceil(N/2)`，行优先**：8 个 Agent 为 4×2，7 个为 4+3，6 个为 3×2，5 个为 3+2；6 个时宽约 106px，输入器不再被单排长条压窄。它不是第二名册：不显示名字、driver、重启/配置，只有工作环与完成点。`max-width: min(240px, 27%)`，列数超出时横向滚动、仍保持两排。 |
 | dock 收窄 | `@container room (max-width: 900px)`：dock 改纵向，输入器占满，活动栏落到卡片下方右对齐（仍两排）；≤760px 由 `.composer-dock` 承担既有 `calc(100% - 24px)` 外边距。`timeline-actions` 的 `--jump-latest-right` 取 dock 右缘，不能取卡片右缘（否则浮标压住活动栏）。 |
 | 助理抽屉 | ≥900px 时占 380px 独立列（`:has()`），不遮挡输入器；<900px 全屏覆盖 |
 | 移动端 | ≤760px：会话栏变成 320px 左侧覆盖抽屉（默认关闭），主列占满宽度；名册只留头像/短名，发送键收成圆形图标，隐藏上下文仪表；`＋` 工作目录仍在输入器里 |
@@ -352,8 +352,8 @@ D-034 曾把历史对话定为纯只读。现在的语义是：**点开是只读
   点击恢复该格跟随并瞬时贴底。它**不是**未读系统，不写 localStorage/DB。
 - 状态点：`working`（当前有该 Agent 的非终态 Turn，`--accent` + 3px wash）/ `ready`（`--ok`）/
   `starting|restarting`（`--warn`）/ `failed`（`--danger`）/ `disabled|missing`（`--faint`）；`room` 无点。
-- 对话框（顶栏 `▦`）：布局 1 / 2 / 4 / 6；每格一个镜片下拉；「按 Agent 铺满」（只取启用且非
-  `pending_restart`，最多 6）；「重置为单窗格」；「在新窗口打开当前目录」（浏览器窗口 = 独立 SSE，
+- 对话框（顶栏 `▦`）：布局 1 / 2 / 4 / 6 / 8；每格一个镜片下拉；「按 Agent 铺满」（只取启用且非
+  `pending_restart`，最多 8）；「重置为单窗格」；「在新窗口打开当前目录」（浏览器窗口 = 独立 SSE，
   用于跨目录/跨屏幕）。
 - 键盘与读屏：`▦`、每格 `select`/`↓`/`×` 都是原生可聚焦元素；每格 `role="group"` 且
   `aria-label="窗格 N：<镜片名>"`；只有主格保留 `aria-live="polite"`，其余 `aria-live="off"`（避免 6 份重复播报）。

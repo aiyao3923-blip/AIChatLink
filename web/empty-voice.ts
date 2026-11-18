@@ -28,6 +28,13 @@ export const DISABLED_NOTE = "它还没被叫醒；历史输出仍可查看，�
 
 const ROLE_VOICES: ReadonlyArray<{ role: string; voice: EmptyVoice }> = [
   {
+    role: "意图",
+    voice: {
+      quote: "先把你没说出口的那半句问出来。",
+      source: "意图，第 0 个问题"
+    }
+  },
+  {
     role: "提案",
     voice: {
       quote: "先把惯例剥掉，剩下的才配叫事实。",
@@ -68,11 +75,18 @@ const ROLE_VOICES: ReadonlyArray<{ role: string; voice: EmptyVoice }> = [
       quote: "查不到就说查不到——这是核验唯一的特权。",
       source: "核验，可信度待定"
     }
+  },
+  {
+    role: "人话",
+    voice: {
+      quote: "术语我懂，你只需要懂结论。",
+      source: "人话，第 0 次翻译"
+    }
   }
 ];
 
 /**
- * Resolve a display name to its role voice. The room's six roles are distinct
+ * Resolve a display name to its role voice. The room's role words are distinct
  * words, so a plain substring test is enough; names outside the roster return
  * `undefined` and the pane keeps its functional copy only.
  */

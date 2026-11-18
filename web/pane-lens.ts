@@ -15,9 +15,9 @@ export interface StoredPanes {
   lenses: PaneLens[];
 }
 
-/** Six panes = 3 columns × 2 rows, the natural maximum for a 6-Agent room. */
-export const MAX_PANES = 6;
-/** The grid is laid out on six equal tracks so 2/3/5 panes can still tile evenly. */
+/** Eight panes = 3 columns × 3 rows, the natural maximum for an 8-Agent room. */
+export const MAX_PANES = 8;
+/** The grid is laid out on six equal tracks so 2/3/5/7/8 panes can still tile evenly. */
 export const PANE_TRACKS = 6;
 
 const ROOM_TOKEN = "room";
@@ -77,7 +77,7 @@ export function normalizePanes(value: unknown): StoredPanes {
   return { count, lenses };
 }
 
-/** 1 → 1 column, 2–4 → 2, 5–6 → 3. */
+/** 1 → 1 column, 2–4 → 2, 5–8 → 3. */
 export function paneColumns(count: number): 1 | 2 | 3 {
   const safe = clampPaneCount(count);
   if (safe <= 1) {
@@ -89,7 +89,8 @@ export function paneColumns(count: number): 1 | 2 | 3 {
 /**
  * Spans on the six-track grid. Each plan fills whole rows:
  * 1 → [6] · 2 → [3,3] · 3 → [3,3,6] · 4 → [3,3,3,3] ·
- * 5 → [2,2,2,3,3] · 6 → [2,2,2,2,2,2].
+ * 5 → [2,2,2,3,3] · 6 → [2,2,2,2,2,2] ·
+ * 7 → [2,2,2,2,2,2,6] · 8 → [2,2,2,2,2,2,3,3].
  */
 export function paneSpans(count: number): number[] {
   const safe = clampPaneCount(count);
@@ -102,6 +103,15 @@ export function paneSpans(count: number): number[] {
   if (safe === 5) {
     spans[3] = 3;
     spans[4] = 3;
+  }
+  if (safe === 7) {
+    // Three full rows of 3: 2+2+2, 2+2+2, then one wide pane.
+    spans[6] = PANE_TRACKS;
+  }
+  if (safe === 8) {
+    // Three full rows of 3: 2+2+2, 2+2+2, then two half-width panes.
+    spans[6] = 3;
+    spans[7] = 3;
   }
   return spans;
 }
