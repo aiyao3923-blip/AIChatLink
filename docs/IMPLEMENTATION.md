@@ -537,6 +537,8 @@ CONTEXT_BUDGET_EXCEEDED
 
 `agents` map 是显式房间名册：键即 agent id(actor 为 `agent:<id>`),写了哪些就启动哪些。缺省配置启用 codex/grok/claude 三个内置 Agent；pi、WorkBuddy 由引导页按探测结果或显式配置加入，Kimi/Hermes 仅作为 legacy 加载旧配置。内置 id 的 `driver` 默认同名；自定义 id 必须显式声明 `driver: codex | grok | claude | pi | workbuddy | kimi | hermes`(后两个为 legacy),driver 决定 native CLI 家族、固定 argv/session 合同与命令解析方式。同一 driver 允许挂多个 agent 实例(各自独立长驻 session)。`name` 是可选显示名:runtime 启动时把它 upsert 进 actors 表，Web UI 的目标 chips、Agent 卡片与身份记忆下拉都按名册动态渲染;内置 id 未配 `name` 时沿用内置种子名。agent id 只允许字母数字开头结尾的 `A-Za-z0-9._-`(≤64 字符),名册至少一个 agent。
 
+`order`(0–9999,可选)只决定名册在顶栏、活动栏与窗格铺设中的呈现顺序:升序在前,未设的排在之后并按 id 排序。它**不参与**派单、`@all`、ask 路由与限流,也不改变 actor 溯源与历史事件。同一任务内对同一 Agent 的多次派单受 `limits.actorCallsPerRoot` 约束(默认 16),与 `order` 无关。
+
 公开 `transport` 配置只接受 `structured`;`direct` 会在解析和 runtime construction 阶段明确失败。message/Turn API 不允许覆盖。运行态公开 Structured、版本、健康状态和 capability snapshot。
 
 Agent `enabled` 默认 true;`enabled: false` 的 agent 不建 Adapter、不进名册 UI。Kimi driver enabled 时不读取或要求修改全局 permission/plan 默认值；ACP process 建立 session 后用 `session/set_mode(auto)` 固定当前 session。Hermes driver 使用 `--yolo acp`，建立或加载 session 后用 `session/set_mode(dont_ask)` 固定当前 session。Claude driver 通过 argv `--permission-mode bypassPermissions` 申请 unrestricted，并在每次 `start()`/`resume()` 用 `control_request`/`set_permission_mode` 建立当前进程的 `bypassPermissions`；`initialize` 只观测 `current_permission_mode`，不因其回显 settings 默认值而失败。不写 Claude Code 的 settings 文件。若 set 的明确 native policy 拒绝或降级成立，则返回 `NATIVE_POLICY_BLOCKED`;其他协议/启动错误按对应 Adapter 错误收敛，不自动禁用 Agent、不切 transport、不写配置。

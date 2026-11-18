@@ -60,6 +60,26 @@
         "<provider>"
       ],
       "contextFiles": false
+    },
+    "pi-intent": {
+      "model": "<model>",
+      "provider": "<provider>",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "<provider>"
+      ],
+      "contextFiles": false
+    },
+    "pi-plain": {
+      "model": "<model>",
+      "provider": "<provider>",
+      "thinking": "high",
+      "tools": "all",
+      "providers": [
+        "<provider>"
+      ],
+      "contextFiles": false
     }
   }
 }

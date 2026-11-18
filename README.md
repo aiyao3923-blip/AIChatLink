@@ -51,7 +51,7 @@ AIChatLink 是一个只监听本机 loopback 的多 Agent 群聊 Broker。用户
 
 **多工作目录**：主目录由配置的 `workspace` 定义，其余目录从输入器 `＋` 或侧栏组头添加。每个目录是一个独立 runtime（独立 SQLite、MCP 绑定、Agent 会话），主界面用 `?ws=` 统一代理；切走目录不会停掉那边的回合。
 
-**显式路由**：选择单个 Agent、多个 Agent 或 `@all` 发送。回复可引用具体消息继续追问；Agent 之间通过 MCP 工具互相派活（见下文工具表）。
+**显式路由**：选择单个 Agent、多个 Agent 或 `@all` 发送。点名册项会把收件人换成那个 Agent（替换式，不是叠加），回全员需显式点 `@all` 或「全选」。回复可引用具体消息继续追问；Agent 之间通过 MCP 工具互相派活（见下文工具表）。
 
 **房间助理**：与用户平级的 `user:assistant` 操作员客户端，侧边对话不进群时间线，可用独立的 `/mcp/operator` 控场或派活。它不是名册 worker，也不是审批层。
 
@@ -150,6 +150,7 @@ aichatlink update                  # 更新当前全局安装
 | `agents.<id>.identity` | 每轮注入的群内身份说明，最多 32,768 字符 |
 | `agents.<id>.model` / `.thinking` | 原生模型 id 与推理强度，只通过 argv / thread 配置生效 |
 | `agents.<id>.piConfig` | 仅 pi：`isolated`（默认）或 `shared` |
+| `agents.<id>.order` | 名册显示顺序（0–9999）。只影响顶栏、活动栏与窗格铺设顺序，不改变派单优先级；缺省按 id 排序，排在有 `order` 的之后 |
 | `agents.<id>.command` | 字符串，或 `{ "executable": "...", "prefixArgs": [...] }` |
 | `agents.<id>.cwd` / `.enabled` | 工作目录；缺省 enabled 为 `true` |
 | `assistant` | 房间助理：`enabled`、`name`、`brain.driver`、`brain.command`、`brain.cwd`、`extraInstructions` |
