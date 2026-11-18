@@ -3324,6 +3324,22 @@
   opacity: 0.55;
 }
 
+/* The roster is also the shortcut for "who am I talking to". */
+.roster-select {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.roster-agent[data-target="true"] {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
+}
+
 .roster-avatar {
   display: grid;
   place-items: center;

@@ -4015,6 +4015,19 @@ function renderAgents(): void {
     status.title = disabled ? "已停用" : humanStatus(agent.status);
     status.setAttribute("aria-hidden", "true");
 
+    // Clicking who you are talking to is the shortcut: the next message goes to
+    // that Agent alone. `@all` and multi-select stay in the picker, unprompted.
+    const choose = document.createElement("button");
+    choose.type = "button";
+    choose.className = "roster-select";
+    choose.title = disabled
+      ? `${agent.displayName} 已停用`
+      : `点一下：下一条消息只发给 ${agent.displayName}`;
+    choose.setAttribute("aria-label", `发送给 ${agent.displayName}`);
+    choose.disabled = disabled;
+    choose.append(avatar, name, status);
+    choose.addEventListener("click", () => selectAgentTarget(agent.actorId));
+
     const restart = document.createElement("button");
     restart.type = "button";
     restart.className = "roster-action";
@@ -4035,7 +4048,7 @@ function renderAgents(): void {
     config.title = `配置 ${agent.displayName}（driver / 身份 / 工作目录）`;
     config.setAttribute("aria-label", `配置 ${agent.displayName}`);
 
-    item.append(avatar, name, status, restart, config);
+    item.append(choose, restart, config);
     agentList.append(item);
     if (
       agent.enabled &&
@@ -4638,19 +4651,42 @@ function updateTargetSummary(selectable = targetInputs()): void {
   if (selected.length === 0) {
     targetSummary.textContent = "未选 Agent";
     targetSummary.title = "尚未选择接收者";
-    return;
-  }
-  if (selected.length === selectable.length) {
+  } else if (selected.length === selectable.length) {
     targetSummary.textContent = "@all";
     targetSummary.title = `全部 ${selected.length} 个 Agent`;
-    return;
+  } else {
+    const names = selected.map((input) => {
+      const agent = state.agents.get(input.value);
+      return `@${agent?.displayName ?? input.value.replace(/^agent:/u, "")}`;
+    });
+    targetSummary.textContent = names.join("、");
+    targetSummary.title = names.join("、");
   }
-  const names = selected.map((input) => {
-    const agent = state.agents.get(input.value);
-    return `@${agent?.displayName ?? input.value.replace(/^agent:/u, "")}`;
-  });
-  targetSummary.textContent = names.join("、");
-  targetSummary.title = names.join("、");
+  markRosterTarget(selected);
+}
+
+/** Mirror a sole recipient back onto the roster so the click is visible. */
+function markRosterTarget(selected: ReadonlyArray<HTMLInputElement>): void {
+  const sole = selected.length === 1 ? selected[0]?.value : undefined;
+  for (const item of Array.from(agentList.querySelectorAll<HTMLElement>(".roster-agent"))) {
+    const current = sole !== undefined && item.dataset.actorId === sole;
+    if (current) item.dataset.target = "true";
+    else delete item.dataset.target;
+  }
+}
+
+/**
+ * Roster click = "talk to this one". It replaces the whole recipient set rather
+ * than toggling, so a stale `@all` can never survive the click; coming back to
+ * `@all` is an explicit click in the picker.
+ */
+function selectAgentTarget(actorId: string): void {
+  const inputs = targetInputs();
+  const chosen = inputs.find((input) => input.value === actorId);
+  if (chosen === undefined || chosen.disabled) return;
+  for (const input of inputs) input.checked = input === chosen;
+  syncTargetAll();
+  invalidatePendingSubmission();
 }
 
 function setTargetPickerOpen(open: boolean): void {
