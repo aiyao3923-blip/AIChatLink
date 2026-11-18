@@ -7,6 +7,7 @@ import {
   turnActivityState
 } from "./conversation-epoch.js";
 import { disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
+import { DISABLED_VOICE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./empty-voice.js";
 import {
   TERMINAL_TURN_STATUSES,
   activeTurnActorIds,
@@ -5146,12 +5147,34 @@ function refreshEmptyStateCopy(): void {
   }
 }
 
+function setPaneVoice(pane: PaneContext, voice: EmptyVoice | undefined): void {
+  const quote = pane.empty.querySelector<HTMLElement>(".pane-empty-quote");
+  if (quote === null) {
+    return;
+  }
+  quote.hidden = voice === undefined;
+  if (voice === undefined) {
+    return;
+  }
+  const text = quote.querySelector<HTMLElement>(".pane-empty-quote-text");
+  const source = quote.querySelector<HTMLElement>(".pane-empty-quote-source");
+  if (text !== null) {
+    text.textContent = `「${voice.quote}」`;
+  }
+  if (source !== null) {
+    source.textContent = `—— ${voice.source}`;
+  }
+}
+
 function refreshPaneEmptyCopy(pane: PaneContext): void {
   const heading = pane.empty.querySelector("h3");
-  const paragraph = pane.empty.querySelector("p");
+  const paragraph =
+    pane.empty.querySelector(".pane-empty-note") ?? pane.empty.querySelector("p");
   if (heading === null || paragraph === null) {
     return;
   }
+  // Every branch that does not name a voice must clear the previous one.
+  setPaneVoice(pane, undefined);
   if (pane.lens.kind === "agent") {
     const agent = state.agents.get(pane.lens.actorId);
     if (agent === undefined) {
@@ -5162,10 +5185,12 @@ function refreshPaneEmptyCopy(pane: PaneContext): void {
     if (!agent.enabled) {
       heading.textContent = `「${agent.displayName}」已停用`;
       paragraph.textContent = "历史输出仍可查看；启用后新回合才会出现在这里。";
+      setPaneVoice(pane, DISABLED_VOICE);
       return;
     }
     heading.textContent = `还没有「${agent.displayName}」的输出`;
     paragraph.textContent = "本轮发给该 Agent 的内容会出现在这里。";
+    setPaneVoice(pane, emptyVoiceFor(agent.displayName));
     return;
   }
   if (conversationView !== null) {
@@ -5180,6 +5205,7 @@ function refreshPaneEmptyCopy(pane: PaneContext): void {
   }
   heading.textContent = "房间已就绪";
   paragraph.textContent = "保持 @all 并行提问，或只勾选一个 Agent 单独对话。监督由房间 Agent 的 send/ask 启动。";
+  setPaneVoice(pane, ROOM_VOICE);
 }
 
 async function refreshHealth(): Promise<void> {

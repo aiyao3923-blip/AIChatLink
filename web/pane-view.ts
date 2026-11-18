@@ -51,7 +51,18 @@ function emptyState(): HTMLLIElement {
   orbit.textContent = "◎";
   const heading = document.createElement("h3");
   const note = document.createElement("p");
-  item.append(orbit, heading, note);
+  note.className = "pane-empty-note";
+  // The epigraph stays last: the state message and its explanation come first,
+  // the role's own voice is the closing line of a still-empty lane.
+  const quote = document.createElement("p");
+  quote.className = "pane-empty-quote";
+  quote.hidden = true;
+  const quoteText = document.createElement("span");
+  quoteText.className = "pane-empty-quote-text";
+  const quoteSource = document.createElement("span");
+  quoteSource.className = "pane-empty-quote-source";
+  quote.append(quoteText, quoteSource);
+  item.append(orbit, heading, note, quote);
   return item;
 }
 

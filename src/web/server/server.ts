@@ -83,6 +83,7 @@ interface StaticAsset {
     | "agent-roster.js"
     | "agent-activity.js"
     | "conversation-epoch.js"
+    | "empty-voice.js"
     | "pagination.js"
     | "pane-lens.js"
     | "pane-view.js"
@@ -104,6 +105,7 @@ const STATIC_ASSETS = new Map<string, StaticAsset>([
   ["/agent-roster.js", { fileName: "agent-roster.js", contentType: "application/javascript; charset=utf-8" }],
   ["/agent-activity.js", { fileName: "agent-activity.js", contentType: "application/javascript; charset=utf-8" }],
   ["/conversation-epoch.js", { fileName: "conversation-epoch.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/empty-voice.js", { fileName: "empty-voice.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pagination.js", { fileName: "pagination.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pane-lens.js", { fileName: "pane-lens.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pane-view.js", { fileName: "pane-view.js", contentType: "application/javascript; charset=utf-8" }],
@@ -118,6 +120,12 @@ const STATIC_ASSETS = new Map<string, StaticAsset>([
   ["/setup.js", { fileName: "setup.js", contentType: "application/javascript; charset=utf-8" }],
   ["/setup.css", { fileName: "setup.css", contentType: "text/css; charset=utf-8" }]
 ]);
+
+/**
+ * Exported so a test can prove every browser module under `web/` is served:
+ * an unregistered import 404s and takes the whole UI down at load time.
+ */
+export const SERVED_STATIC_PATHS: readonly string[] = Object.freeze([...STATIC_ASSETS.keys()]);
 
 class HttpStatusError extends AIChatLinkError {
   readonly status: number;

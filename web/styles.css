@@ -1112,6 +1112,32 @@
   line-height: 1.75;
 }
 
+/* The empty room's epigraph: a silent lane states its own method. Serif and
+   upright — synthesized italics on a CJK serif read as a rendering defect. */
+.empty-state .pane-empty-quote {
+  display: grid;
+  gap: 2px;
+  max-width: 34em;
+  margin: var(--s-4) 0 0;
+  color: var(--ink-2);
+  font-family: var(--font-serif);
+  font-size: var(--fs-15);
+  line-height: 1.7;
+  letter-spacing: 0.01em;
+}
+
+/* Author display rules beat the UA [hidden] rule, so hide explicitly. */
+.empty-state .pane-empty-quote[hidden] {
+  display: none;
+}
+
+.pane-empty-quote-source {
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+  letter-spacing: 0.08em;
+}
+
 /* date + system notes */
 
 .date-divider {
@@ -4438,6 +4464,12 @@ html[data-panes="grid"] .pane-empty h3 {
 
 html[data-panes="grid"] .pane-empty p {
   font-size: var(--fs-12);
+}
+
+html[data-panes="grid"] .pane-empty .pane-empty-quote {
+  margin-top: var(--s-3);
+  font-size: var(--fs-13);
+  line-height: 1.65;
 }
 
 /* A lane collapses the operator's prompt to one line: the six-lane wall is for
