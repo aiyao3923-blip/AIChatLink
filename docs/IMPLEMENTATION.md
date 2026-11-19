@@ -293,6 +293,7 @@ REST 负责有副作用的用户命令；SSE 负责服务端事件流。
 | GET | `/api/events?afterSeq=` | SSE 增量事件；支持 `Last-Event-ID` |
 | POST | `/api/messages` | 用户定向消息、`@all`，或可选监督配对 |
 | POST | `/api/turns/:id/cancel` | 请求原生取消 |
+| GET | `/api/turns/:id/progress` | 读取进行中 Turn 的观测快照（不持久化） |
 | GET | `/api/memory` | 查询公共记忆 |
 | POST | `/api/memory` | 用户显式固定记忆 |
 | POST | `/api/memory/:id/supersede` | 追加替代版本 |
@@ -322,6 +323,7 @@ UI 只根据 Envelope actor 渲染发送者，不解析正文决定头像或身�
 用量控件显示的是 active checkpoint 加其后 `message.created` 的保守字符估算，不是模型 token window；目标 Agent 身份、记忆与原生 instructions 仍会另占空间。手动压缩同样经过 Broker 和 `clientCommandId` receipt，保留最近 12 条消息原文，不删除 transcript。
 `tool.progress` 按 `turnId + toolCallId` 归并到对应 Agent 的会话气泡，started/completed 更新同一条；默认只显示一行工具名与状态，用户点击“展开”后才显示受限长度的结构化详情。terminal 时同形投影写成 `tool.progress.recorded`，刷新后仍走同一归并/折叠路径。两种事件都不得回退成独立的全量 JSON 事件卡，也不得进入 Agent 上下文。
 忙碌时发送键就是终止键：转圈可点，点击对当前对话里全部未终态 Turn 各发一条 `POST /api/turns/:id/cancel`（逐 Turn 幂等，不新增端点），Enter 仍只走提交守卫（D-050）。
+运行中的 Turn 在卡片头「取消」右侧还有一个 `过程` 按钮：它按需打开 `GET /api/turns/:id/progress` 的观测面（状态、已运行时长、排队位、有界正文/推理、工具摘要），关闭或终态即停轮询。观测面不进入消息流、不落库，进程重启后不可回读（D-065）。
 
 首版将模型输出作为普通文本渲染，不执行其中的 HTML/脚本。服务器只绑定 loopback；AIChatLink 不在其上叠加认证、Origin 防护或浏览器安全策略。
 

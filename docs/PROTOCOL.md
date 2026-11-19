@@ -558,7 +558,7 @@ Content-Type: application/json
 }
 ```
 
-### 10.3 取消
+### 10.3 取消与进行中观测
 
 `POST /api/turns/:turnId/cancel` 表达取消意图。Structured Adapter 调用 App Server/ACP 原生 cancel 或 interrupt，只作用于所属进程树。响应成功不等于 native CLI 已完成取消；最终结果由 SSE terminal event 确认。历史 Direct Turn 只返回其已持久终态，不启动旧 Adapter。
 
