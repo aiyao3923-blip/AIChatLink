@@ -79,3 +79,54 @@ export function sendButtonState(input: ComposerStateInput): SendButtonState {
   }
   return SEND;
 }
+
+export interface UserMessageLike {
+  readonly eventId: string;
+  readonly correlationId: string;
+  readonly content: string;
+}
+
+export type ResumeReason = "restored" | "kept-draft" | "no-message";
+
+export interface ResumeAfterStopPlan {
+  /** What to put back into the textarea, or null when nothing should change. */
+  readonly content: string | null;
+  /** The message the follow-up continues, so the room sees what is being amended. */
+  readonly replyToEventId: string | null;
+  readonly reason: ResumeReason;
+}
+
+/**
+ * Stopping a task is only useful if the operator can fix it. This decides what
+ * "补一句再继续" starts from:
+ *
+ * 1. never overwrite a draft the operator is already typing (`kept-draft`);
+ * 2. otherwise bring back the newest prompt that owned one of the cancelled
+ *    Turns, and thread the follow-up under it;
+ * 3. if that prompt is no longer in view (another conversation, a reset), say so
+ *    instead of restoring something unrelated.
+ *
+ * `messages` is expected oldest → newest and user-authored only; the caller owns
+ * that projection because the DOM layer owns the event store.
+ */
+export function planResumeAfterStop(input: {
+  readonly cancelledCorrelationIds: readonly string[];
+  readonly messages: readonly UserMessageLike[];
+  readonly draftLength: number;
+}): ResumeAfterStopPlan {
+  if (input.draftLength > 0) {
+    return { content: null, replyToEventId: null, reason: "kept-draft" };
+  }
+  const wanted = new Set(input.cancelledCorrelationIds.filter((id) => id.length > 0));
+  if (wanted.size === 0) {
+    return { content: null, replyToEventId: null, reason: "no-message" };
+  }
+  for (let index = input.messages.length - 1; index >= 0; index -= 1) {
+    const message = input.messages[index];
+    if (!message || !wanted.has(message.correlationId)) continue;
+    const content = message.content.trim();
+    if (content.length === 0) continue;
+    return { content, replyToEventId: message.eventId, reason: "restored" };
+  }
+  return { content: null, replyToEventId: null, reason: "no-message" };
+}

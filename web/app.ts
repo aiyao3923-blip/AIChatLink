@@ -14,7 +14,11 @@ import {
   cancellableTurnIds,
   isFinishedTransition
 } from "./agent-activity.js";
-import { sendButtonState } from "./composer-state.js";
+import {
+  planResumeAfterStop,
+  sendButtonState,
+  type ResumeAfterStopPlan
+} from "./composer-state.js";
 import { parseReasoningRecord } from "./reasoning-record.js";
 import { copyPlainText, flashButtonLabel, renderRichContent } from "./rich-text.js";
 import { describeToolProgress, mergeToolProgressSnapshot } from "./tool-progress.js";
@@ -2029,6 +2033,43 @@ let stopInFlight = false;
 const STOP_ACK_STATUS = "已请求终止本轮所有 Agent，等待收尾";
 /** Re-clicking a stop whose Turns are all `cancel_requested` says this instead. */
 const STOP_RETRY_STATUS = "已请求终止，等待 Agent 收尾";
+/** Stopping is a correction loop: the prompt comes back so it can be amended. */
+const STOP_RESUME_STATUS = "已终止；原任务已放回输入框，补充后可直接发送";
+const STOP_KEPT_DRAFT_STATUS = "已终止；你的草稿已保留";
+
+/** The operator's own prompts in the open epoch, oldest first. */
+function userMessagesInView(): { eventId: string; correlationId: string; content: string }[] {
+  const epochStart = activeEpochStartSeq(conversations);
+  return Array.from(state.messages.values())
+    .filter((envelope) => envelope.actor.kind === "user" && eventInEpoch(envelope.seq, epochStart))
+    .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0))
+    .map((envelope) => ({
+      eventId: envelope.eventId,
+      correlationId: envelope.correlationId,
+      content: messageContent(envelope.body)
+    }));
+}
+
+/**
+ * Put the stopped prompt back so the operator can finish the sentence instead of
+ * retyping it. The follow-up is threaded under the original message, which is
+ * also how the Agents see that this is a correction and not a new task; the
+ * reply chip stays clearable if they would rather send something unrelated.
+ */
+function restoreStoppedPrompt(plan: ResumeAfterStopPlan): boolean {
+  if (plan.content === null) return false;
+  messageInput.value = plan.content;
+  saveDraft();
+  updateCharacterCount();
+  autoresizeComposer();
+  if (plan.replyToEventId !== null) setReply(plan.replyToEventId);
+  invalidatePendingSubmission();
+  syncTargetAvailability();
+  syncSendButton();
+  messageInput.focus();
+  messageInput.setSelectionRange(plan.content.length, plan.content.length);
+  return true;
+}
 
 async function stopAllAgentWork(): Promise<void> {
   if (stopInFlight) return;
@@ -2044,7 +2085,22 @@ async function stopAllAgentWork(): Promise<void> {
   stopInFlight = false;
   const failures = results.filter((result): result is { ok: false; message: string } => !result.ok);
   if (failures.length === 0) {
-    setComposerStatus(STOP_ACK_STATUS);
+    const resumed = restoreStoppedPrompt(
+      planResumeAfterStop({
+        cancelledCorrelationIds: turnIds.map(
+          (turnId) => state.turns.get(turnId)?.correlationId ?? ""
+        ),
+        messages: userMessagesInView(),
+        draftLength: messageInput.value.trim().length
+      })
+    );
+    setComposerStatus(
+      resumed
+        ? STOP_RESUME_STATUS
+        : messageInput.value.trim().length > 0
+          ? STOP_KEPT_DRAFT_STATUS
+          : STOP_ACK_STATUS
+    );
   } else {
     setComposerStatus(
       `${failures.length} 个取消失败：${failures[0]?.message ?? "未知错误"}；可再次点击重试`,

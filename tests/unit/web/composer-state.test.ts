@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { sendButtonState } from "../../../web/composer-state.js";
+import { planResumeAfterStop, sendButtonState } from "../../../web/composer-state.js";
 
 const idle = { submitting: false, workingCount: 0, draftLength: 0, stopping: false };
 
@@ -63,5 +63,69 @@ describe("composer send/stop button", () => {
 
   it("prefers the submit block over the stop button: one POST is one intent", () => {
     expect(sendButtonState({ ...idle, submitting: true, workingCount: 3 }).mode).toBe("blocked");
+  });
+});
+
+describe("resume after stop", () => {
+  const messages = [
+    { eventId: "evt:1", correlationId: "corr:a", content: "  先分析日志  " },
+    { eventId: "evt:2", correlationId: "corr:b", content: "顺手把 README 也改了" }
+  ];
+
+  it("brings back the newest prompt that owned a cancelled Turn", () => {
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["corr:a", "corr:b"],
+        messages,
+        draftLength: 0
+      })
+    ).toEqual({ content: "顺手把 README 也改了", replyToEventId: "evt:2", reason: "restored" });
+  });
+
+  it("picks the message of the cancelled correlation, not the newest message overall", () => {
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["corr:a"],
+        messages,
+        draftLength: 0
+      })
+    ).toEqual({ content: "先分析日志", replyToEventId: "evt:1", reason: "restored" });
+  });
+
+  it("never overwrites a draft the operator is already typing", () => {
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["corr:a"],
+        messages,
+        draftLength: 7
+      })
+    ).toEqual({ content: null, replyToEventId: null, reason: "kept-draft" });
+  });
+
+  it("reports no-message when the prompt is out of view instead of restoring a stranger", () => {
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["corr:gone"],
+        messages,
+        draftLength: 0
+      })
+    ).toEqual({ content: null, replyToEventId: null, reason: "no-message" });
+  });
+
+  it("ignores blank correlations and blank content", () => {
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["  "],
+        messages,
+        draftLength: 0
+      }).reason
+    ).toBe("no-message");
+    expect(
+      planResumeAfterStop({
+        cancelledCorrelationIds: ["corr:blank"],
+        messages: [{ eventId: "evt:9", correlationId: "corr:blank", content: "   " }],
+        draftLength: 0
+      }).reason
+    ).toBe("no-message");
   });
 });
