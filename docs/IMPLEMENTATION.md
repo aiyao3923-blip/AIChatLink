@@ -455,6 +455,9 @@ Structured session 的启动/恢复对明确的临时启动、握手、`PROTOCOL
 - Broker 命令接收可并发；数据库写入以事务序列化关键不变量；
 - 每个 Agent lane 单飞；
 - 不同 Agent lane 并行；
+- **非终态 Turn 必须有限步收敛**：替换 native session（context reset、conversation resume、delete、`restartFresh`）之前，Broker 先 `abort` 在飞 Turn，并在 `timeouts.closeMs` 内等它落终态；超时则由 Store 写 `turn.interrupted`（`interruptTurns`），不再依赖已消失的原生进程发事件；
+- **取消必须能收敛**：`cancel` 遇到「无 active dispatch 且无存活 lane」的 Turn（上一次进程的残留、被替换的会话）时，直接把它收敛为 `interrupted`，不返回 `running`；刚被 claim 的 Turn 有 `GHOST_TURN_GRACE_MS` 宽限，避免抢在 `#execute` 之前误杀；
+- **lane 不静默停摆**：`SESSION_NOT_AVAILABLE` 只让 lane 等 `LANE_RETRY_MS` 后重查一次；重启循环结束后主动唤醒被重启的 Agent，让排队 Turn 拿到新会话；
 - 可见性与唤醒分离：消息默认全房间可见，`to` 只决定谁得到 Turn；
 - SSE 对每个浏览器连接有有界发送队列；
 - 慢浏览器只能丢弃可重建的 delta，不能丢 durable terminal event；

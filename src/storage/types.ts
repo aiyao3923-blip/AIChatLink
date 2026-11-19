@@ -877,6 +877,16 @@ export interface AIChatLinkStore {
   }): SummaryRecord[];
   replaceActiveSummary(input: ReplaceRoomSummaryInput): SummaryRecord;
   recoverAfterRestart(now?: string): RecoveryResult;
+  /**
+   * Force specific non-terminal Turns to a durable `interrupted` terminal.
+   * Used when the caller can prove nothing is driving them: a cancelled Turn
+   * whose lane holds no dispatch, or a session swap that outlived its bound.
+   */
+  interruptTurns(input: {
+    turnIds: readonly string[];
+    occurredAt?: string;
+    reason?: string;
+  }): { interruptedTurns: TurnRecord[] };
   rememberMemory(input: CreateMemoryInput): MemoryRecord;
   mutateMemoryWithDisposition(input: MutateMemoryInput): MemoryMutationOutcome;
   getMemory(memoryId: string): MemoryRecord | undefined;

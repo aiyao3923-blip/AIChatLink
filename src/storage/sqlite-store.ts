@@ -3523,69 +3523,12 @@ export class SqliteAIChatLinkStore implements AIChatLinkStore {
           continue;
         }
 
-        const source = this.#database
-          .prepare("SELECT room_id FROM events WHERE event_id = ?")
-          .get(turn.sourceEventId) as Row | undefined;
-        if (!source) {
-          throw new AIChatLinkError("STORE_UNAVAILABLE", "Recovery found a Turn without its source event");
-        }
-        if (attempt?.deliveryCertainty === "delivered") {
-          this.#advanceDeliveryCursorUnsafe(
-            turn.targetActorId,
-            requiredString(source.room_id, "room_id"),
-            attempt.contextThroughSeq,
-            attempt.summaryThroughSeq,
-            now
-          );
-        }
-        const terminalEvent = this.#insertEventUnsafe({
-          roomId: requiredString(source.room_id, "room_id"),
-          eventType: "turn.interrupted",
-          actorId: BUILTIN_ACTORS.system.actorId,
-          targets: [],
-          replyToEventId: turn.sourceEventId,
-          causationId: turn.turnId,
-          correlationId: turn.rootCorrelationId,
-          occurredAt: now,
-          body: {
-            turnId: turn.turnId,
-            previousStatus: turn.status,
+        interruptedTurns.push(
+          this.#interruptTurnRowUnsafe(turn, now, {
             ...(attempt === undefined ? {} : { dispatchPhase: attempt.dispatchPhase }),
             deliveryCertainty: "unknown"
-          },
-          provenance: {
-            sourceKind: "system",
-            sourceEventId: turn.sourceEventId
-          }
-        });
-        const updated = this.#database
-          .prepare(`
-            UPDATE turns
-            SET status = 'interrupted', terminal_event_id = ?,
-                error_code = 'TURN_INTERRUPTED', terminal_at = ?
-            WHERE turn_id = ? AND status = ?
-          `)
-          .run(terminalEvent.eventId, now, turn.turnId, turn.status);
-        if (updated.changes !== 1) {
-          throw new AIChatLinkError("STORE_CONFLICT", "Recovery Turn compare-and-set failed");
-        }
-        if (attempt !== undefined) {
-          const attemptUpdated = this.#database
-            .prepare(`
-              UPDATE turn_attempts
-              SET terminal_at = ?, dispatch_phase = 'terminal',
-                  delivery_certainty = 'unknown'
-              WHERE attempt_id = ? AND terminal_at IS NULL
-            `)
-            .run(now, attempt.attemptId);
-          if (attemptUpdated.changes !== 1) {
-            throw new AIChatLinkError(
-              "STORE_CONFLICT",
-              "Recovery attempt compare-and-set failed"
-            );
-          }
-        }
-        interruptedTurns.push(this.#getTurnUnsafe(turn.turnId)!);
+          })
+        );
       }
 
       const queuedTurns = (
@@ -3599,6 +3542,127 @@ export class SqliteAIChatLinkStore implements AIChatLinkStore {
       ).map(mapTurn);
       return { queuedTurns, interruptedTurns };
     });
+  }
+
+  /**
+   * Force a non-terminal Turn to a durable `interrupted` terminal.
+   *
+   * The caller has already established that nothing is driving the Turn (a dead
+   * process at startup, or a lane that gave up its claim). Writing the terminal
+   * record here is what keeps "running" from being a state a Turn can never
+   * leave: the transcript, the attempt, and the delivery cursor all move in one
+   * transaction, so a later replay cannot resurrect it.
+   */
+  interruptTurns(input: {
+    turnIds: readonly string[];
+    occurredAt?: string;
+    reason?: string;
+  }): { interruptedTurns: TurnRecord[] } {
+    this.#assertOpen();
+    const now = input.occurredAt ?? nowIso();
+    const wanted = new Set(input.turnIds);
+    if (wanted.size === 0) return { interruptedTurns: [] };
+    return this.#withImmediateTransaction(() => {
+      const rows = (
+        this.#database
+          .prepare(`
+            SELECT * FROM turns
+            WHERE status IN ('dispatching', 'running', 'cancelling')
+            ORDER BY enqueue_seq, turn_id
+          `)
+          .all() as Row[]
+      )
+        .map(mapTurn)
+        .filter((turn) => wanted.has(turn.turnId));
+      const interruptedTurns = rows.map((turn) => {
+        const attemptRow = this.#database
+          .prepare(`
+            SELECT * FROM turn_attempts
+            WHERE turn_id = ? AND terminal_at IS NULL
+          `)
+          .get(turn.turnId) as Row | undefined;
+        const attempt = attemptRow ? mapTurnAttempt(attemptRow) : undefined;
+        return this.#interruptTurnRowUnsafe(turn, now, {
+          reason: input.reason ?? "no_active_dispatch",
+          ...(attempt === undefined ? {} : { dispatchPhase: attempt.dispatchPhase }),
+          deliveryCertainty: "unknown"
+        });
+      });
+      return { interruptedTurns };
+    });
+  }
+
+  #interruptTurnRowUnsafe(
+    turn: TurnRecord,
+    now: string,
+    eventBody: Readonly<Record<string, unknown>>
+  ): TurnRecord {
+    const attemptRow = this.#database
+      .prepare(`
+        SELECT * FROM turn_attempts
+        WHERE turn_id = ? AND terminal_at IS NULL
+      `)
+      .get(turn.turnId) as Row | undefined;
+    const attempt = attemptRow ? mapTurnAttempt(attemptRow) : undefined;
+    const source = this.#database
+      .prepare("SELECT room_id FROM events WHERE event_id = ?")
+      .get(turn.sourceEventId) as Row | undefined;
+    if (!source) {
+      throw new AIChatLinkError("STORE_UNAVAILABLE", "Recovery found a Turn without its source event");
+    }
+    if (attempt?.deliveryCertainty === "delivered") {
+      this.#advanceDeliveryCursorUnsafe(
+        turn.targetActorId,
+        requiredString(source.room_id, "room_id"),
+        attempt.contextThroughSeq,
+        attempt.summaryThroughSeq,
+        now
+      );
+    }
+    const terminalEvent = this.#insertEventUnsafe({
+      roomId: requiredString(source.room_id, "room_id"),
+      eventType: "turn.interrupted",
+      actorId: BUILTIN_ACTORS.system.actorId,
+      targets: [],
+      replyToEventId: turn.sourceEventId,
+      causationId: turn.turnId,
+      correlationId: turn.rootCorrelationId,
+      occurredAt: now,
+      body: {
+        ...eventBody,
+        turnId: turn.turnId,
+        previousStatus: turn.status
+      },
+      provenance: {
+        sourceKind: "system",
+        sourceEventId: turn.sourceEventId
+      }
+    });
+    const updated = this.#database
+      .prepare(`
+        UPDATE turns
+        SET status = 'interrupted', terminal_event_id = ?,
+            error_code = 'TURN_INTERRUPTED', terminal_at = ?
+        WHERE turn_id = ? AND status = ?
+      `)
+      .run(terminalEvent.eventId, now, turn.turnId, turn.status);
+    if (updated.changes !== 1) {
+      throw new AIChatLinkError("STORE_CONFLICT", "Recovery Turn compare-and-set failed");
+    }
+    if (attempt !== undefined) {
+      const attemptUpdated = this.#database
+        .prepare(`
+          UPDATE turn_attempts
+          SET terminal_at = ?, dispatch_phase = 'terminal',
+              delivery_certainty = 'unknown'
+          WHERE attempt_id = ? AND terminal_at IS NULL
+        `)
+        .run(now, attempt.attemptId);
+      if (attemptUpdated.changes !== 1) {
+        throw new AIChatLinkError("STORE_CONFLICT", "Recovery attempt compare-and-set failed");
+      }
+    }
+    return this.#getTurnUnsafe(turn.turnId)!;
   }
 
   #insertMemoryUnsafe(input: CreateMemoryInput, supersedesMemoryId?: string): MemoryRecord {

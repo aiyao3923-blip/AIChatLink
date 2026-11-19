@@ -1246,3 +1246,56 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 新增 4 项（同房持有、到界放行、排除派发者链、空闲立即执行）；`tests/unit/storage` 覆盖
 `listTurns({ roomId })`；`tests/unit/config.test.ts` 与 `tests/unit/app/cli.test.ts`
 各覆盖解析与 `/setup` 往返。
+
+## D-054：非终态 Turn 必须有限步收敛——会话替换前收尸，取消必须能结束它
+
+触发证据：用户实测「一号对话发任务跑着，我去新建对话做别的事，上一个任务就一直显示运行中，
+既没有输出，也无法继续发指令」。核对实现得到三个独立缺口：
+
+1. `context/reset`、`conversations/resume`、`conversation/delete` 的 `resetNativeSessions` 分支
+   会逐个 `restartFresh` 全部 Agent，但**从不 abort 在飞的 Turn**（全仓只有 `#performClose` 会
+   abort `#active`）。native 进程被杀之后，该 Turn 唯一的出口是「来自已不存在进程的事件」。
+2. `cancelTurn` 在 `#active` 里找不到该 Turn 时只读 DB 状态并原样返回 `running`
+   ——「运行中」因此成为不可离开状态，同时房间级忙锁把输入器永久锁住。
+3. `#prepareNext` 在 `sessions.resolve` 失败时 `return undefined`：Turn 保持 `queued`，
+   既不落终态也不重试，只能等某个不相关事件碰巧唤醒这条 lane。
+4. `recoverStaleRuntimeRecords` 只收敛 binding/instance；Turn 的启动对账在
+   `store.recoverAfterRestart` 里**已有**（`dispatching/running/cancelling → interrupted`），
+   所以重启能治好，但同一进程内卡住的 Turn 没有第二次机会。
+
+决定：
+
+1. **会话替换是有序的**：`#settleInFlightForSessionSwap` 在任何 `restartFresh` 之前执行——
+   先 `abort` 该房间所有非终态 Turn 的 controller，在 `timeouts.closeMs` 内轮询等待落终态；
+   超时则由新增的 `store.interruptTurns` 写 `turn.interrupted`（含 attempt 收敛、delivery cursor
+   推进、terminal 事件），再执行重启。**新会话启动时，旧会话上的 Turn 必须已经是终态**。
+2. **取消是兜底出口**：`#active` 缺失且 lane 已不存在时，`cancel` 定点收敛该 Turn 为
+   `interrupted`（`reason=cancel_without_active_dispatch`）。两条守卫防止抢跑健康 lane：
+   `#pumps` 仍持有该 actor 则不介入；claim 年轻于 `GHOST_TURN_GRACE_MS`（5s）或仍有未结
+   attempt 时按「可能正在走向 `#execute`」处理。
+3. **lane 不静默停摆**：`SESSION_NOT_AVAILABLE` 触发一次 `LANE_RETRY_MS`（2s）后的重查；
+   重启循环结束后 `#nudgeRestartedActors` 主动唤醒全部 Agent，让排队 Turn 拿到新会话。
+   这不是自动重放 prompt：重放门槛仍由 `markPromptInvoked` / delivery certainty 决定。
+4. **被放弃的 pump 不得劫持 lane**：`#pumps` 的清理改为 identity-guarded；强行收敛一个
+   忽略 abort 的原生流时，lane 立即释放给后续 Turn，孤儿 pump 只能写终态 no-op。
+5. **持久化面只加一个方法**（`interruptTurns`），复用 `recoverAfterRestart` 已有的中断分支
+   （抽为 `#interruptTurnRowUnsafe`），不新增第二套终态写法。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 忙碌时**拒绝**重置/续接 | 重置是用户显式动作，拒绝会把「我要开新对话」变成死路；真正要做的是先收尸再换会话 |
+| 只靠启动对账（`recoverAfterRestart`） | 同一进程内卡住的 Turn 等不到下次重启；用户看到的正是这种 |
+| 取消时无条件强杀非终态 Turn | 会抢在 FIFO claim 与 `#execute` 之间误杀健康 Turn（已有一条既有测试证明该窗口存在） |
+| 给 `#prepareNext` 加重试上限后失败终态 | 会话重启是合法瞬态；把「等一下就好」判成失败会丢掉本可完成的工作 |
+| 让 UI 乐观解锁绕过忙锁 | 忙锁是正确的事实投影；掩盖它会让真实的长期运行任务失去可见性 |
+
+原因：Turn 的状态机只要存在「可以离开但没人负责推进」的状态，用户看到的就是「运行中」这种
+既非成功也非失败的僵尸。收尸责任必须落在唯一权威写入者（Broker/Store）身上，
+并且以「谁替换了承载它的进程」为触发条件，而不是以超时猜测。
+
+变更条件：若将来允许同一 Agent 并发多 Turn（`IMPLEMENTATION.md:223` 目前禁止），
+会话替换的等待集必须按 binding 而不是按房间重算，且 `GHOST_TURN_GRACE_MS` 需重新定义。
+
+完成标准：`npm run typecheck` 通过；`npm test`（75 文件 / 803 项）通过；
+`tests/unit/broker/broker.test.ts` 新增 4 项（stranded 取消收敛、新鲜 claim 不误杀、
+重置前收尸且换会话后可继续派发、session 暂不可用后 lane 自愈）。

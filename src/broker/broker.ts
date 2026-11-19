@@ -96,6 +96,19 @@ const RUNNING_TURN_STATUSES: readonly TurnStatus[] = [
 const DEFAULT_FINISH_LAST_WAIT_MS = 1_800_000;
 /** How often a held finish-last Turn re-checks its room while nothing else moves. */
 const FINISH_LAST_RECHECK_MS = 30_000;
+/**
+ * A lane whose session is temporarily unavailable re-checks instead of parking
+ * the head Turn forever. Two seconds is short enough to feel continuous and
+ * long enough that a restarting Agent is not hammered.
+ */
+const LANE_RETRY_MS = 2_000;
+/** How often a session swap re-checks whether an aborted Turn has settled. */
+const SESSION_SWAP_POLL_MS = 20;
+/**
+ * A claim younger than this may still be walking from the FIFO head to
+ * `#execute`; only an older claim (or one with no open attempt) is a ghost.
+ */
+const GHOST_TURN_GRACE_MS = 5_000;
 
 const DEFAULT_PARTIAL_CHECKPOINT_CHARS = 4_096;
 const DEFAULT_NATIVE_CANCEL_TIMEOUT_MS = 5_000;
@@ -209,6 +222,7 @@ export class AIChatLinkBroker {
   readonly #finishLastActors: ReadonlySet<string>;
   readonly #finishLastWaitMs: number;
   readonly #finishLastTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  readonly #laneRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #partialCheckpointChars: number;
   readonly #nativeCancelTimeoutMs: number;
   readonly #closeTimeoutMs: number;
@@ -703,6 +717,10 @@ export class AIChatLinkBroker {
           });
           await this.#publishStored(event);
           if (input.resetNativeSessions && this.#agentController) {
+            await this.#settleInFlightForSessionSwap(
+              input.roomId,
+              "Conversation deleted; native sessions are being replaced"
+            );
             for (const adapter of this.#adapters.list()) {
               const controller = this.#agentController;
               if (controller.restartFresh !== undefined) {
@@ -711,6 +729,7 @@ export class AIChatLinkBroker {
                 await controller.restart(adapter.actorId);
               }
             }
+            this.#nudgeRestartedActors();
           }
         }
         throughSeq = reset.throughSeq;
@@ -808,11 +827,16 @@ export class AIChatLinkBroker {
         });
         await this.#publishStored(event);
         if (input.resetNativeSessions && this.#agentController) {
+          await this.#settleInFlightForSessionSwap(
+            input.roomId,
+            "Room context reset; native sessions are being replaced"
+          );
           for (const adapter of this.#adapters.list()) {
             const controller = this.#agentController;
             if (controller.restartFresh !== undefined) await controller.restartFresh(adapter.actorId);
             else await controller.restart(adapter.actorId);
           }
+          this.#nudgeRestartedActors();
         }
       }
       if (this.#storeWritesFenced) {
@@ -863,11 +887,16 @@ export class AIChatLinkBroker {
       });
       await this.#publishStored(event);
       if (input.resetNativeSessions && this.#agentController) {
+        await this.#settleInFlightForSessionSwap(
+          input.roomId,
+          "Conversation resumed; native sessions are being replaced"
+        );
         for (const adapter of this.#adapters.list()) {
           const controller = this.#agentController;
           if (controller.restartFresh !== undefined) await controller.restartFresh(adapter.actorId);
           else await controller.restart(adapter.actorId);
         }
+        this.#nudgeRestartedActors();
       }
       if (this.#storeWritesFenced) {
         throw new AIChatLinkError(
@@ -975,6 +1004,7 @@ export class AIChatLinkBroker {
 
     const active = this.#active.get(turnId);
     if (!active) {
+      await this.#interruptStrandedTurn(turn);
       return this.#cancelOutcomeFromStore(turnId);
     }
     active.cancelRequested = true;
@@ -1002,6 +1032,47 @@ export class AIChatLinkBroker {
       }
       return this.#cancelOutcomeFromStore(turnId);
     }
+  }
+
+  /**
+   * A Turn that is non-terminal yet holds no dispatch in this process is a
+   * ghost: its lane is gone (a replaced session, a dead pump, a previous
+   * process). The operator's cancel must be able to end it, otherwise
+   * "running" is a state the Turn can never leave and the room stays locked.
+   *
+   * Two guards keep this from racing a healthy lane. A live pump owns the actor,
+   * so its claim is a microtask away from `#execute`; and a claim younger than
+   * `GHOST_TURN_GRACE_MS` may simply be in that same window even when the pump
+   * has already exited. Only a Turn with no open attempt, or one whose attempt
+   * is older than the grace, is provably stranded.
+   */
+  async #interruptStrandedTurn(turn: TurnRecord): Promise<void> {
+    if (TERMINAL_TURN_STATUSES.has(turn.status) || turn.status === "queued") return;
+    if (this.#pumps.has(turn.targetActorId)) return;
+    if (!this.#turnIsStranded(turn)) return;
+    const { interruptedTurns } = this.#store.interruptTurns({
+      turnIds: [turn.turnId],
+      occurredAt: this.#clock.now(),
+      reason: "cancel_without_active_dispatch"
+    });
+    for (const interrupted of interruptedTurns) {
+      if (interrupted.terminalEventId) {
+        const event = this.#store.getEvent(interrupted.terminalEventId);
+        if (event) await this.#publishStored(event);
+      }
+      this.#notifyTurnTerminal(interrupted.turnId);
+    }
+  }
+
+  #turnIsStranded(turn: TurnRecord): boolean {
+    const open = this.#store
+      .listTurnAttempts(turn.turnId)
+      .find((attempt) => attempt.terminalAt === undefined);
+    if (open === undefined) return true;
+    const claimedAt = Date.parse(open.claimedAt);
+    const observedAt = Date.parse(this.#clock.now());
+    if (!Number.isFinite(claimedAt) || !Number.isFinite(observedAt)) return false;
+    return observedAt - claimedAt >= GHOST_TURN_GRACE_MS;
   }
 
   async cancelFromBinding(input: CancelTurnFromBindingInput): Promise<CancelTurnOutcome> {
@@ -1567,6 +1638,8 @@ export class AIChatLinkBroker {
     this.#closed = true;
     for (const timer of this.#finishLastTimers.values()) clearTimeout(timer);
     this.#finishLastTimers.clear();
+    for (const timer of this.#laneRetryTimers.values()) clearTimeout(timer);
+    this.#laneRetryTimers.clear();
     this.#closingController.abort(new AIChatLinkError("TURN_INTERRUPTED", "Broker is closing"));
     for (const active of this.#active.values()) {
       active.controller.abort(new AIChatLinkError("TURN_INTERRUPTED", "Broker is closing"));
@@ -1606,15 +1679,20 @@ export class AIChatLinkBroker {
         this.#report(error, { operation: "dispatch", actorId });
       })
       .finally(() => {
-        this.#pumps.delete(actorId);
-        if (!this.#closed && this.#dirtyActors.has(actorId)) {
-          queueMicrotask(() => this.#scheduleActor(actorId));
+        // Identity-guarded: a swap may have released this lane and started a
+        // replacement pump for the same actor. The old pump must not evict it.
+        if (this.#pumps.get(actorId) === pump) {
+          this.#pumps.delete(actorId);
+          if (!this.#closed && this.#dirtyActors.has(actorId)) {
+            queueMicrotask(() => this.#scheduleActor(actorId));
+          }
         }
       });
     this.#pumps.set(actorId, pump);
   }
 
   async #runActorPump(actorId: string): Promise<void> {
+    this.#clearLaneRetry(actorId);
     while (!this.#closed) {
       this.#dirtyActors.delete(actorId);
       while (!this.#closed) {
@@ -1670,8 +1748,7 @@ export class AIChatLinkBroker {
     return true;
   }
 
-  /** In-flight Turns that a finish-last Turn must wait for. */
-  #finishLastBlockers(head: TurnRecord): TurnRecord[] {
+  /** In-flight Turns that a finish-last Turn must wait for. */  #finishLastBlockers(head: TurnRecord): TurnRecord[] {
     const source = this.#store.getEvent(head.sourceEventId);
     if (!source) return [];
     const callerChain = this.#callerChain(head);
@@ -1701,7 +1778,7 @@ export class AIChatLinkBroker {
     return chain;
   }
 
-  /** Re-check a held lane even when no peer Turn settles (bounded by the wait). */
+  /** Re-check a parked lane even when no peer Turn settles (bounded by the wait). */
   #armFinishLastRecheck(actorId: string): void {
     if (this.#closed || this.#finishLastTimers.has(actorId)) return;
     const timer = setTimeout(() => {
@@ -1717,6 +1794,102 @@ export class AIChatLinkBroker {
     if (timer === undefined) return;
     clearTimeout(timer);
     this.#finishLastTimers.delete(actorId);
+  }
+
+  /**
+   * A lane that cannot resolve its session must not park its head Turn quietly.
+   * Session replacement is transient (a restart, a teardown), so the lane gets
+   * one bounded re-check instead of waiting for an unrelated event to nudge it.
+   */
+  #scheduleLaneRetry(actorId: string): void {
+    if (this.#closed || this.#laneRetryTimers.has(actorId)) return;
+    const timer = setTimeout(() => {
+      this.#laneRetryTimers.delete(actorId);
+      if (!this.#closed) this.#scheduleActor(actorId);
+    }, LANE_RETRY_MS);
+    timer.unref?.();
+    this.#laneRetryTimers.set(actorId, timer);
+  }
+
+  #clearLaneRetry(actorId: string): void {
+    const timer = this.#laneRetryTimers.get(actorId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.#laneRetryTimers.delete(actorId);
+  }
+
+  /** Non-terminal Turns of one room that still occupy a session. */
+  #sessionOccupyingTurns(roomId: string): TurnRecord[] {
+    const turns: TurnRecord[] = [];
+    for (const status of RUNNING_TURN_STATUSES) {
+      if (status === "queued") continue;
+      for (const turn of this.#store.listTurns({ roomId, status })) {
+        turns.push(turn);
+      }
+    }
+    return turns;
+  }
+
+  /**
+   * Replacing a native session is a process swap. A Turn still claiming to run
+   * on the old session must reach a durable terminal *before* the new session
+   * starts: otherwise its only exit is a native event from a process that no
+   * longer exists, and the operator is left with a card that says "running"
+   * forever while the composer stays locked.
+   */
+  async #settleInFlightForSessionSwap(roomId: string, reason: string): Promise<void> {
+    const tracked = this.#sessionOccupyingTurns(roomId);
+    if (tracked.length === 0) return;
+    const turnIds = new Set(tracked.map((turn) => turn.turnId));
+    for (const entry of this.#active.values()) {
+      if (turnIds.has(entry.preparation.claim.turn.turnId)) {
+        entry.controller.abort(new AIChatLinkError("TURN_INTERRUPTED", reason));
+      }
+    }
+    const deadline = Date.now() + this.#closeTimeoutMs;
+    while (Date.now() < deadline) {
+      const remaining = this.#sessionOccupyingTurns(roomId).filter((turn) =>
+        turnIds.has(turn.turnId)
+      );
+      if (remaining.length === 0) return;
+      await new Promise((resolve) => setTimeout(resolve, SESSION_SWAP_POLL_MS));
+    }
+    const stranded = this.#sessionOccupyingTurns(roomId)
+      .filter((turn) => turnIds.has(turn.turnId))
+      .map((turn) => turn.turnId);
+    if (stranded.length === 0) return;
+    // The Adapter ignored the abort. Write the terminal record here so the swap
+    // cannot orphan the Turn; a late native terminal is rejected by the store's
+    // compare-and-set instead of overwriting it.
+    const { interruptedTurns } = this.#store.interruptTurns({
+      turnIds: stranded,
+      occurredAt: this.#clock.now(),
+      reason
+    });
+    for (const turn of interruptedTurns) {
+      const entry = this.#active.get(turn.turnId);
+      if (entry !== undefined) entry.terminal = true;
+      // The native stream that ignored the abort cannot be joined; release the
+      // lane so queued work is not held hostage by a generator this process can
+      // no longer steer. The orphaned pump can only write terminal no-ops.
+      this.#pumps.delete(turn.targetActorId);
+      if (turn.terminalEventId) {
+        const event = this.#store.getEvent(turn.terminalEventId);
+        if (event) await this.#publishStored(event);
+      }
+      this.#notifyTurnTerminal(turn.turnId);
+    }
+  }
+
+  /**
+   * After a restart loop the sessions exist again, so any Turn that was parked
+   * on SESSION_NOT_AVAILABLE has to be offered the new session. Without this
+   * nudge the deposit is durable but never claimed.
+   */
+  #nudgeRestartedActors(): void {
+    for (const adapter of this.#adapters.list()) {
+      this.#scheduleActor(adapter.actorId);
+    }
   }
 
   /**
@@ -1758,6 +1931,9 @@ export class AIChatLinkBroker {
         session = await this.#sessions.resolve({ actorId, adapterId: adapter.adapterId });
       } catch (error) {
         this.#report(error, { operation: "dispatch", actorId, turnId: head.turnId });
+        // The session may be mid-restart. Re-check instead of parking the head
+        // Turn until some unrelated event happens to nudge this lane.
+        this.#scheduleLaneRetry(actorId);
         return undefined;
       }
       if (this.#closed) return undefined;

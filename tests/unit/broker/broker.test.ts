@@ -18,6 +18,7 @@ import type {
 import { AIChatLinkBroker } from "../../../src/broker/broker.js";
 import type {
   BrokerAgentController,
+  BrokerContextController,
   BrokerContextProvider,
   BrokerDependencies,
   BrokerTurnLifecycle
@@ -213,6 +214,8 @@ function seedBindings(store: SqliteAIChatLinkStore): void {
 
 function createFixture(input: {
   sessionFailureActor?: string;
+  /** Mutable gate: a lane can fail to resolve its session, then recover. */
+  sessionUnavailable?: { value: boolean };
   closeTimeoutMs?: number;
   nativeCancelTimeoutMs?: number;
   contextProvider?: BrokerContextProvider;
@@ -255,6 +258,9 @@ function createFixture(input: {
       : { acceptMessageLimits: input.acceptMessageLimits }),
     sessions: {
       resolve: ({ actorId, adapterId }) => {
+        if (input.sessionUnavailable?.value === true) {
+          throw new AIChatLinkError("SESSION_NOT_AVAILABLE", "fixture session unavailable");
+        }
         if (actorId === input.sessionFailureActor) {
           throw new AIChatLinkError("SESSION_NOT_AVAILABLE", "fixture session unavailable");
         }
@@ -2504,5 +2510,174 @@ describe.sequential("AIChatLinkBroker finish-last gate", () => {
     });
     await waitUntil(() => fixture.store.getTurn(closing.turns[0]!.turnId)?.status === "completed");
     expect(fixture.adapters.grok.prompts).toHaveLength(1);
+  });
+});
+
+describe.sequential("AIChatLinkBroker session-swap coordination", () => {
+  const hungStream = (adapterId: string): PromptHandler =>
+    async function* (_session, input) {
+      yield nativeEvent(adapterId, "turn.started", {}, `${input.turnId}:start`);
+      // A native stream that never ends and ignores the abort signal: the exact
+      // shape that used to leave a Turn "running" forever after a session swap.
+      await new Promise<void>(() => undefined);
+    };
+
+  const resetController = () => {
+    const usage = conversationUsage();
+    return {
+      inspectUsage: () => usage,
+      compactNow: async () => ({ compacted: false, usage }),
+      resetNow: (roomId: string, resetNativeSessions?: boolean) => {
+        const throughSeq = 1;
+        return { reset: true, throughSeq, resetNativeSessions: resetNativeSessions === true, usage };
+      },
+      resumeNow: (
+        _roomId: string,
+        _resume: { conversationId: string; fromSeq: number; throughSeq: number },
+        resetNativeSessions?: boolean
+      ) => {
+        const throughSeq = 2;
+        return { reset: true, throughSeq, resetNativeSessions: resetNativeSessions === true, usage };
+      }
+    } satisfies BrokerContextController;
+  };
+
+  it("ends a stranded Turn when the operator cancels it instead of reporting running", async () => {
+    const fixture = createFixture({ clock: { now: () => "2026-08-11T00:00:30.000Z" } });
+    const accepted = fixture.store.acceptMessage({
+      sourceBindingId: "binding:web",
+      clientCommandId: "stranded-source",
+      roomId: "room:main",
+      targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+      content: "never answered"
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    const source = fixture.store.getEvent(accepted.messageEventId)!;
+    // Claimed by a lane that no longer exists (process gone, attempt still open).
+    fixture.store.claimNextQueuedTurn({
+      targetActorId: "agent:codex",
+      bindingId: "binding:codex",
+      instanceId: "instance:codex",
+      contextThroughSeq: source.seq,
+      expectedTurnId: turnId,
+      expectedTransport: "structured",
+      claimedAt: "2026-08-11T00:00:00.000Z"
+    });
+
+    await expect(fixture.broker.cancelTurn(turnId)).resolves.toMatchObject({
+      accepted: true,
+      status: "interrupted"
+    });
+    expect(fixture.store.getTurn(turnId)).toMatchObject({
+      status: "interrupted",
+      errorCode: "TURN_INTERRUPTED"
+    });
+    expect(fixture.published.some((event) => event.type === "turn.interrupted")).toBe(true);
+    expect(fixture.adapters.codex.prompts).toHaveLength(0);
+  });
+
+  it("leaves a freshly claimed Turn to its live lane", async () => {
+    const fixture = createFixture({ clock: { now: () => "2026-08-11T00:00:05.000Z" } });
+    const accepted = fixture.store.acceptMessage({
+      sourceBindingId: "binding:web",
+      clientCommandId: "fresh-claim-source",
+      roomId: "room:main",
+      targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+      content: "just claimed"
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    const source = fixture.store.getEvent(accepted.messageEventId)!;
+    fixture.store.claimNextQueuedTurn({
+      targetActorId: "agent:codex",
+      bindingId: "binding:codex",
+      instanceId: "instance:codex",
+      contextThroughSeq: source.seq,
+      expectedTurnId: turnId,
+      expectedTransport: "structured",
+      claimedAt: "2026-08-11T00:00:04.000Z"
+    });
+
+    await expect(fixture.broker.cancelTurn(turnId)).resolves.toMatchObject({
+      accepted: true,
+      status: "cancelling"
+    });
+    expect(fixture.store.getTurn(turnId)?.status).toBe("cancelling");
+  });
+
+  async function expectResetSettlesInFlight(closeTimeoutMs: number): Promise<void> {
+    const observed: string[] = [];
+    const restartFresh = vi.fn(async () => {
+      observed.push("restartFresh");
+    });
+    const fixture = createFixture({
+      agentController: { restart: vi.fn(async () => undefined), restartFresh },
+      contextController: resetController(),
+      closeTimeoutMs
+    });
+    fixture.adapters.codex.handler = hungStream("codex");
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "swap-in-flight", to: ["agent:codex"], content: "long job" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await waitUntil(() => fixture.store.getTurn(turnId)?.status === "running");
+
+    const restarted = vi.fn(() => {
+      observed.push(`status_at_restart:${fixture.store.getTurn(turnId)?.status ?? "missing"}`);
+    });
+    restartFresh.mockImplementation(async () => {
+      restarted();
+    });
+
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "swap-reset",
+      roomId: "room:main",
+      resetNativeSessions: true
+    });
+
+    // The swap is ordered: every Turn is terminal before any new session starts.
+    const atRestart = observed.filter((entry) => entry.startsWith("status_at_restart:"));
+    expect(atRestart).toEqual([
+      "status_at_restart:interrupted",
+      "status_at_restart:interrupted",
+      "status_at_restart:interrupted"
+    ]);
+    expect(restartFresh).toHaveBeenCalledTimes(3);
+    expect(fixture.store.getTurn(turnId)).toMatchObject({
+      status: "interrupted",
+      errorCode: "TURN_INTERRUPTED"
+    });
+    // The lane is not held hostage by the hung native stream: the next Turn for
+    // the same Agent still dispatches and completes.
+    fixture.adapters.codex.handler = completedHandler("codex");
+    const next = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "swap-next", to: ["agent:codex"], content: "next job" }
+    });
+    await waitUntil(() => fixture.store.getTurn(next.turns[0]!.turnId)?.status === "completed");
+  }
+
+  it("settles an in-flight Turn before replacing native sessions on reset", async () => {
+    await expectResetSettlesInFlight(50);
+  });
+
+  it("re-checks a lane whose session is temporarily unavailable", async () => {
+    const gate = { value: true };
+    const fixture = createFixture({ sessionUnavailable: gate });
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "parked", to: ["agent:codex"], content: "resume me" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await fixture.broker.waitForIdle();
+    expect(fixture.store.getTurn(turnId)?.status).toBe("queued");
+
+    gate.value = false;
+    await waitUntil(
+      () => fixture.store.getTurn(turnId)?.status === "completed",
+      5_000
+    );
+    expect(fixture.adapters.codex.prompts).toHaveLength(1);
   });
 });
