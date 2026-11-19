@@ -864,19 +864,10 @@ export class AIChatLinkBroker {
           });
           await this.#publishStored(event);
           if (input.resetNativeSessions && this.#agentController) {
-            await this.#settleInFlightForSessionSwap(
+            await this.#replaceNativeSessions(
               input.roomId,
               "Conversation deleted; native sessions are being replaced"
             );
-            for (const adapter of this.#adapters.list()) {
-              const controller = this.#agentController;
-              if (controller.restartFresh !== undefined) {
-                await controller.restartFresh(adapter.actorId);
-              } else {
-                await controller.restart(adapter.actorId);
-              }
-            }
-            this.#nudgeRestartedActors();
           }
         }
         throughSeq = reset.throughSeq;
@@ -974,16 +965,10 @@ export class AIChatLinkBroker {
         });
         await this.#publishStored(event);
         if (input.resetNativeSessions && this.#agentController) {
-          await this.#settleInFlightForSessionSwap(
+          await this.#replaceNativeSessions(
             input.roomId,
             "Room context reset; native sessions are being replaced"
           );
-          for (const adapter of this.#adapters.list()) {
-            const controller = this.#agentController;
-            if (controller.restartFresh !== undefined) await controller.restartFresh(adapter.actorId);
-            else await controller.restart(adapter.actorId);
-          }
-          this.#nudgeRestartedActors();
         }
       }
       if (this.#storeWritesFenced) {
@@ -1034,16 +1019,10 @@ export class AIChatLinkBroker {
       });
       await this.#publishStored(event);
       if (input.resetNativeSessions && this.#agentController) {
-        await this.#settleInFlightForSessionSwap(
+        await this.#replaceNativeSessions(
           input.roomId,
           "Conversation resumed; native sessions are being replaced"
         );
-        for (const adapter of this.#adapters.list()) {
-          const controller = this.#agentController;
-          if (controller.restartFresh !== undefined) await controller.restartFresh(adapter.actorId);
-          else await controller.restart(adapter.actorId);
-        }
-        this.#nudgeRestartedActors();
       }
       if (this.#storeWritesFenced) {
         throw new AIChatLinkError(
@@ -1986,6 +1965,43 @@ export class AIChatLinkBroker {
       }
     }
     return turns;
+  }
+
+  /**
+   * Replace every native session after the room's context changed. Reset,
+   * resume and delete all need the same contract: nothing may be dispatched
+   * until every Adapter is on its fresh session, so the swap is awaited before
+   * the command receipt is written.
+   *
+   * It runs as one batch because the restarts are independent child processes.
+   * Serializing them put the whole swap on the operator's critical path: after a
+   * conversation resume the Web UI posts the message only once this returns, so
+   * two recorded resumes left ~10.9s between `context.reset` and the next
+   * `message.created` (D-064).
+   *
+   * A failed restart does not cancel the others: the lanes that did restart
+   * still need their nudge, or a Turn parked on `SESSION_NOT_AVAILABLE` stays
+   * durable but unclaimed. The first failure is rethrown afterwards, so the
+   * resume/delete/reset still fails loudly.
+   */
+  async #replaceNativeSessions(roomId: string, reason: string): Promise<void> {
+    const controller = this.#agentController;
+    if (!controller) return;
+    await this.#settleInFlightForSessionSwap(roomId, reason);
+    const results = await Promise.allSettled(
+      this.#adapters.list().map(async (adapter) => {
+        if (controller.restartFresh !== undefined) {
+          await controller.restartFresh(adapter.actorId);
+        } else {
+          await controller.restart(adapter.actorId);
+        }
+      })
+    );
+    this.#nudgeRestartedActors();
+    const failures = results.filter(
+      (result): result is PromiseRejectedResult => result.status === "rejected"
+    );
+    if (failures.length > 0) throw failures[0]!.reason;
   }
 
   /**

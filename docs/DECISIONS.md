@@ -1684,3 +1684,35 @@ durability 声明，所以不违反那两条。
 完成标准：`npm run typecheck` 通过；`npm test`（77 文件 / 823 项）通过；
 `npm run build` 产出 `dist/web/pending-echo.js` 且服务端 `STATIC_ASSETS` 已登记（`static-assets.test.ts` 通过）。
 实时观感未在运行实例上观测——该实例是全局安装包（`@aiyao/aichatlink`），需重新安装/重启后生效。
+
+## D-064：会话替换把全部 native session 的 restart 一次性并发
+
+触发证据：同 D-063 的两段记录。那 ≈10.9s 里，`#completeResumeCommand` 跑的是一个
+`for (const adapter of this.#adapters.list()) await restartFresh(...)` 串行循环：该房间 8 个
+pi 会话各约 1.4s，合计 11s，全部落在操作者的关键路径上（HTTP 响应要等它，消息 POST 又要等
+HTTP 响应）。context reset 与 conversation delete 两条路径里是同样的串行循环。
+
+决定：
+
+1. 三条路径原有的三份串行循环合并成私有方法 `#replaceNativeSessions(roomId, reason)`：
+   先 `#settleInFlightForSessionSwap`，再对全部 Adapter 并发 `restartFresh`（无该能力则 `restart`）。
+2. **仍要 await 完再写回执**：回执之后才允许派发，否则消息可能落到尚未替换的旧原生会话上——
+   这是 D-054 的收尸语义与「续聊先换会话」合同，不能为了快而放弃。
+3. **失败不互相取消**：`Promise.allSettled` 收齐之后先 `#nudgeRestartedActors()`（重启成功的
+   lane 要能拿到新会话，否则停在 `SESSION_NOT_AVAILABLE` 的 Turn 会「耐久但永远没人领」），
+   再把第一个失败抛出，所以 resume/delete/reset 仍然如实失败。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 保持串行，只把 HTTP 响应提前返回 | 回执之后才能派发；提前返回会把消息派给还没换掉的旧会话 |
+| 只重启本次消息目标那一个 Agent | 房间上下文已经换了，其余 Agent 的原生会话仍装着旧对话，下一轮就会串味 |
+| 失败时立刻中止其余 restart | 半换的会话比全换更糟：已换的 lane 拿不到 nudge，排队 Turn 滞留 |
+| 在 `startAll` 外面再包一层并行重试 | 每个 Agent 的 retry 已在 `#openWithRetry` 内，外层再包只会放大启动风暴 |
+
+原因：并发的是**互不依赖的子进程**，正确性只依赖「同一房间的派发在全部换完之后」，不依赖
+「一个一个换」。变慢的是操作者等待，不是任何一条不变量。
+
+完成标准：`npm run typecheck` 通过；`npm test`（77 文件 / 823 项）通过；`npm run m0:probe:fixtures`
+通过；新增单测 `replaces every native session as one batch and finishes the others when one fails`
+断言三个 Adapter 的 `start:` 都先于任何 `end:` 出现，且其中一个抛错后其余仍被重启。
+耗时改善未在运行实例上测量（需重启运行进程），本条目只记录结构与记录到的空窗。

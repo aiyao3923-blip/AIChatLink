@@ -675,6 +675,88 @@ describe.sequential("AIChatLinkBroker acceptance, dispatch and terminal semantic
     );
   });
 
+  it("replaces every native session as one batch and finishes the others when one fails", async () => {
+    let store: SqliteAIChatLinkStore | undefined;
+    const usage = {
+      roomId: "room:main",
+      throughSeq: 4,
+      estimatedCharacters: 160,
+      maxCharacters: 256_000,
+      compactionTriggerCharacters: 192_000,
+      utilizationPercent: 0,
+      uncompactedMessageCount: 0,
+      compactable: false
+    } as const;
+    const resumeNow = vi.fn((roomId: string, _resume: unknown, resetNativeSessions?: boolean) => {
+      const throughSeq = store!.getRoomHighWaterSeq(roomId);
+      store!.recordContextReset({
+        roomId,
+        throughSeq,
+        ...(resetNativeSessions === undefined ? {} : { resetNativeSessions })
+      });
+      return { reset: true, throughSeq, resetNativeSessions: resetNativeSessions === true, usage };
+    });
+    // `start:` before every `end:` is the whole point: the swap used to await
+    // one native handshake at a time, which is what put ~10.9s between the
+    // resume and the operator's message (D-064).
+    const order: string[] = [];
+    const restartFresh = vi.fn(async (actorId: string) => {
+      order.push(`start:${actorId}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      order.push(`end:${actorId}`);
+      if (actorId === "agent:grok") {
+        throw new AIChatLinkError("ADAPTER_START_FAILED", "fixture restart failed");
+      }
+    });
+    const fixture = createFixture({
+      agentController: { restart: restartFresh, restartFresh },
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => {
+          const throughSeq = store!.getRoomHighWaterSeq(roomId);
+          store!.recordContextReset({ roomId, throughSeq });
+          return { reset: true, throughSeq, resetNativeSessions: false, usage };
+        },
+        resumeNow
+      }
+    });
+    store = fixture.store;
+    fixture.store.acceptMessage({
+      sourceBindingId: "binding:web",
+      clientCommandId: "swap-source-message",
+      roomId: "room:main",
+      targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+      content: "plan the migration"
+    });
+    const source = fixture.broker.listConversations("room:main")[0]!;
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "swap-reset-1",
+      roomId: "room:main"
+    });
+
+    await expect(
+      fixture.broker.resumeConversationFromBinding({
+        bindingId: "binding:web",
+        clientCommandId: "swap-resume-1",
+        conversationId: source.conversationId,
+        roomId: "room:main",
+        resetNativeSessions: true
+      })
+    ).rejects.toThrow("fixture restart failed");
+
+    // All three adapters are restarted, and every one of them starts before any
+    // of them ends: a serial loop would read start/end/start/end/start/end.
+    expect(restartFresh.mock.calls.map((call) => call[0])).toEqual([
+      "agent:codex",
+      "agent:grok",
+      "agent:kimi"
+    ]);
+    expect(order.slice(0, 3).every((step) => step.startsWith("start:"))).toBe(true);
+    expect(order.filter((step) => step.startsWith("end:"))).toHaveLength(3);
+  });
+
   it("keeps a reset-without-messages boundary out of the conversation list", async () => {
     const usage = {
       roomId: "room:main",
