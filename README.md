@@ -7,7 +7,7 @@
 一个 Web UI，统一完成群聊路由、会话恢复、上下文压缩与本地记忆。
 
 ![Node](https://img.shields.io/badge/node-24.14.x-3c873a)
-![Tests](https://img.shields.io/badge/tests-769%20passing-0d9f6e)
+![Tests](https://img.shields.io/badge/tests-791%20passing-0d9f6e)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-0078d6)
 ![Transport](https://img.shields.io/badge/transport-structured-9440c9)
 ![License](https://img.shields.io/badge/license-MIT-2ea44f)
@@ -225,6 +225,8 @@ AIChatLink 为每个房间 Agent 生成独立的 `.aichatlink/pi-agents/<agent-i
 - **会话栏**：只放按工作目录分组的对话。组头 = 折叠箭头 + 状态点 + 标签 + 路径末两段 + 会话数 + `＋`（在该目录新建对话）与 `⋯`（打开文件夹 / 重启 / 移除）。
 - **阅读列**：消息直接接在顶栏下；右下角浮动「对话目录」与「回到最新」两个按钮。
 - **输入器**：一行操作条——`发送给 @…`、`＋ 工作目录`、本条字符数与房间上下文估算；空草稿时后两者隐藏。
+- **忙碌态**：任一 Agent 还在跑时，发送键变成「终止」并保留旋转环——点一次就对当前对话里**全部**在飞 Turn 发起取消（逐 Turn 幂等，可重试）；`Enter` 只走提交守卫，不会误终止。
+- **显示尺度**：整壳由「一个设计像素」`--px` 驱动，≤1600px 视口恒为 1×（笔记本观感不变），1920 ≈ 1.07×、2560 = 1.2×、≥3520 封顶 1.4×；字号基准保留 `1rem`，系统字号与浏览器缩放继续生效。
 - **助理抽屉**：宽屏独立列，窄屏全屏覆盖。
 - **公共记忆**：顶栏 `◆` 打开的对话框，不占常驻正文。
 
@@ -290,7 +292,7 @@ Structured Agent 每回合可通过 AIChatLink MCP（`/mcp`，绑定身份由 Br
 
 ```bash
 npm run typecheck     # 类型检查
-npm test              # 739 项单元与集成测试
+npm test              # 791 项单元与集成测试
 npm run build         # tsc + 复制 web 资源到 dist
 ```
 
