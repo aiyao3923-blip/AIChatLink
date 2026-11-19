@@ -14,6 +14,7 @@ const timeouts = {
   cancelMs: 1_000,
   closeMs: 1_000,
   askMs: 1_000,
+  finishLastWaitMs: 1_800_000,
   watchMs: 1_000
 };
 

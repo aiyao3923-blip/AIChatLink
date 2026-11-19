@@ -539,6 +539,8 @@ CONTEXT_BUDGET_EXCEEDED
 
 `order`(0–9999,可选)只决定名册在顶栏、活动栏与窗格铺设中的呈现顺序:升序在前,未设的排在之后并按 id 排序。它**不参与**派单、`@all`、ask 路由与限流,也不改变 actor 溯源与历史事件。同一任务内对同一 Agent 的多次派单受 `limits.actorCallsPerRoot` 约束(默认 16),与 `order` 无关。
 
+`finishLast`(布尔,可选)是**收尾席位**:为 true 的 Agent 其 Turn 在同一房间里必须等其它未结算 Turn 全部 terminal 才被 claim，所以「人话」不会在审查/核验跑完之前交稿。它与 `order` 相反，是派单语义而非呈现:等待集排除派发者自身 Turn 及其祖先链(否则派单者在自己的工具调用里等它，必然死锁)，并以 `timeouts.finishLastWaitMs`(默认 1_800_000 ms)为上界——到界即放行并记异常，不做永久停摆。Turn 在被放行前保持 `queued`:消息已持久化、`queuePosition` 可见、可 `cancel`。`finishLast` 随 `/setup` 保存原样往返，当前没有专用开关;`/setup` 页面按 `order` 的先例透传该字段。
+
 公开 `transport` 配置只接受 `structured`;`direct` 会在解析和 runtime construction 阶段明确失败。message/Turn API 不允许覆盖。运行态公开 Structured、版本、健康状态和 capability snapshot。
 
 Agent `enabled` 默认 true;`enabled: false` 的 agent 不建 Adapter、不进名册 UI。Kimi driver enabled 时不读取或要求修改全局 permission/plan 默认值；ACP process 建立 session 后用 `session/set_mode(auto)` 固定当前 session。Hermes driver 使用 `--yolo acp`，建立或加载 session 后用 `session/set_mode(dont_ask)` 固定当前 session。Claude driver 通过 argv `--permission-mode bypassPermissions` 申请 unrestricted，并在每次 `start()`/`resume()` 用 `control_request`/`set_permission_mode` 建立当前进程的 `bypassPermissions`；`initialize` 只观测 `current_permission_mode`，不因其回显 settings 默认值而失败。不写 Claude Code 的 settings 文件。若 set 的明确 native policy 拒绝或降级成立，则返回 `NATIVE_POLICY_BLOCKED`;其他协议/启动错误按对应 Adapter 错误收敛，不自动禁用 Agent、不切 transport、不写配置。

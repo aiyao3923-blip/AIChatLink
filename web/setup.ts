@@ -22,6 +22,8 @@ interface AgentDraft {
   piConfig?: "isolated" | "shared";
   /** Roster position in the room header; carried through saves untouched. */
   order?: number;
+  /** Finish-last seat: waits for the room's other in-flight Turns; carried through untouched. */
+  finishLast?: boolean;
   command: {
     executable: string;
     prefixArgs: string[];

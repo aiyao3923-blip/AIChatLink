@@ -438,6 +438,12 @@ export class AIChatLinkRuntime {
             .filter(([, agent]) => agent.order !== undefined)
             .map(([agentId, agent]) => [`agent:${agentId}`, agent.order as number])
         ),
+        finishLastActors: new Set(
+          Object.entries(this.config.agents)
+            .filter(([, agent]) => agent.finishLast === true)
+            .map(([agentId]) => `agent:${agentId}`)
+        ),
+        finishLastWaitMs: this.config.timeouts.finishLastWaitMs,
         defaultRoomId: this.roomId,
         nativeCancelTimeoutMs: this.config.timeouts.cancelMs,
         closeTimeoutMs: this.config.timeouts.closeMs,

@@ -813,6 +813,11 @@ export interface AIChatLinkStore {
     targetActorId?: string;
     rootCorrelationId?: string;
     sourceEventId?: string;
+    /**
+     * Room of the Turn's source event. Used by the finish-last gate to see the
+     * other in-flight Turns a room still has, without scanning every Turn.
+     */
+    roomId?: string;
   }): TurnRecord[];
   countTurns(): number;
   claimNextQueuedTurn(input: {

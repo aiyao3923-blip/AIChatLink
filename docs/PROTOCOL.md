@@ -491,7 +491,13 @@ sourceMessageEventId + targetActorId
 
 - durable `seq` 是数据库提交顺序；
 - 同一 Agent lane 按 Turn enqueue seq FIFO；
-- 不同 Agent 的完成顺序不固定；
+- 不同 Agent 的完成顺序不固定；**唯一例外**是 `finishLast` 席位：该 Agent 的 Turn 在
+  同一房间仍有其它未 terminal Turn 时保持 `queued`、不 claim、不调用原生 prompt，
+  等它们全部 terminal 后由 Broker 自动放行（`turn.dispatched` 因此晚于上游 `turn.completed`）；
+- `finishLast` 的等待集排除**派发者自身 Turn 及其祖先链**（`turns.parent_turn_id`）：
+  上游工具调用正阻塞等待本 Turn 回答，等待它们即自造死锁；
+- `finishLast` 等待有上界 `timeouts.finishLastWaitMs`（默认 30 分钟）。到界即放行并记录
+  异常，宁可交付一份带缺口的汇报，也不让房间永久停摆；
 - transient delta 只在同一 native Turn 的 `chunkIndex` 内有序；
 - UI 不应按到达时间重新排序已经有 durable seq 的事件。
 

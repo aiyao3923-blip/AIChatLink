@@ -86,6 +86,15 @@ const agentConfigSchema = z
      */
     order: z.number().int().min(0).max(9_999).optional(),
     /**
+     * Finish-last seat. A Turn for this Agent is not dispatched until every
+     * other in-flight Turn in the same room has reached a terminal status, so a
+     * closing/summary role can never speak before the review Turns it reports
+     * on. Dispatch semantics, unlike `order`, which is presentation only.
+     * A bounded release (`timeouts.finishLastWaitMs`) keeps a stuck peer from
+     * parking the closing Turn forever.
+     */
+    finishLast: z.boolean().optional(),
+    /**
      * pi only. `shared` mounts the user's own pi capability surface
      * (settings, extensions, Agents, skills, full model catalog) in the role
      * directory; `isolated` keeps the bounded credential copy. Default:
@@ -231,6 +240,12 @@ const configSchema = z
         cancelMs: z.number().int().min(100).max(300_000).default(10_000),
         closeMs: z.number().int().min(100).max(300_000).default(5_000),
         askMs: z.number().int().min(100).max(3_600_000).default(120_000),
+        /**
+         * Upper bound on how long a finish-last Turn may stay held behind other
+         * in-flight Turns in its room. The bound is a deadlock release, not a
+         * target: a healthy room releases the Turn as soon as the peers settle.
+         */
+        finishLastWaitMs: z.number().int().min(1_000).max(86_400_000).default(1_800_000),
         watchMs: z.number().int().min(100).max(3_600_000).default(120_000)
       })
       .strict()
@@ -242,6 +257,7 @@ const configSchema = z
         cancelMs: 10_000,
         closeMs: 5_000,
         askMs: 120_000,
+        finishLastWaitMs: 1_800_000,
         watchMs: 120_000
       })
   })

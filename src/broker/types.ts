@@ -160,6 +160,14 @@ export interface BrokerDependencies {
   selectedTransport: RuntimeTransport;
   /** Roster position per full actor id (`agent:<id>`); presentation only. */
   agentOrder?: ReadonlyMap<string, number>;
+  /**
+   * Finish-last seats (`agent:<id>`). A Turn for one of these actors is held
+   * while other in-flight Turns remain in its room, so a closing role cannot
+   * answer before the review Turns it summarizes. Empty/omitted = no gate.
+   */
+  finishLastActors?: ReadonlySet<string>;
+  /** Release bound for a held finish-last Turn. Defaults to 30 minutes. */
+  finishLastWaitMs?: number;
   clock?: BrokerClock;
   idFactory?: BrokerIdFactory;
   defaultRoomId?: string;

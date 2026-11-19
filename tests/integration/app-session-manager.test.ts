@@ -138,6 +138,7 @@ function fixture(transport: "direct" | "structured") {
       cancelMs: 100,
       closeMs: 25,
       askMs: 100,
+      finishLastWaitMs: 1_800_000,
       watchMs: 100
     }
   };
@@ -355,7 +356,7 @@ describe("AgentSessionManager lifecycle", () => {
       },
       timeouts: {
         handshakeMs: 100, requestMs: 100, firstEventMs: 100, idleMs: 100,
-        cancelMs: 100, closeMs: 25, askMs: 100, watchMs: 100
+        cancelMs: 100, closeMs: 25, askMs: 100, finishLastWaitMs: 1_800_000, watchMs: 100
       }
     };
     const progress: Array<{ phase: string; agentId: string; attempt: number }> = [];

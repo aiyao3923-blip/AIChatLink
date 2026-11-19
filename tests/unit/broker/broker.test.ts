@@ -223,6 +223,9 @@ function createFixture(input: {
   selectedTransport?: "direct" | "structured";
   acceptMessageLimits?: BrokerDependencies["acceptMessageLimits"];
   agentController?: BrokerAgentController;
+  finishLastActors?: ReadonlySet<string>;
+  finishLastWaitMs?: number;
+  clock?: BrokerDependencies["clock"];
 } = {}): Fixture {
   const directory = mkdtempSync(join(tmpdir(), "aichatlink-broker-"));
   const store = new SqliteAIChatLinkStore(join(directory, "aichatlink.db"));
@@ -275,7 +278,9 @@ function createFixture(input: {
       : { datedMemoryController: input.datedMemoryController }),
     ...(input.turnLifecycle === undefined ? {} : { turnLifecycle: input.turnLifecycle }),
     ...(input.agentController === undefined ? {} : { agentController: input.agentController }),
-    clock: { now: () => "2026-08-11T00:00:02.000Z" },
+    ...(input.finishLastActors === undefined ? {} : { finishLastActors: input.finishLastActors }),
+    ...(input.finishLastWaitMs === undefined ? {} : { finishLastWaitMs: input.finishLastWaitMs }),
+    clock: input.clock ?? { now: () => "2026-08-11T00:00:02.000Z" },
     idFactory: (() => {
       let sequence = 0;
       return (prefix: string) => `${prefix}_fixture_${++sequence}`;
@@ -2372,5 +2377,132 @@ describe.sequential("AIChatLinkBroker unrestricted native policy and facade meth
     ] as const) {
       expect(fixture.published.filter((event) => event.type === type)).toHaveLength(1);
     }
+  });
+});
+
+describe.sequential("AIChatLinkBroker finish-last gate", () => {
+  it("holds a finish-last Turn until the room's other in-flight Turns settle", async () => {
+    const fixture = createFixture({ finishLastActors: new Set(["agent:grok"]) });
+    const reviewRelease = deferred();
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await reviewRelease.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "review done" });
+    };
+
+    const review = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "review", to: ["agent:codex"], content: "审查这一版" }
+    });
+    await waitUntil(() => fixture.store.getTurn(review.turns[0]!.turnId)?.status === "running");
+
+    const closing = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "closing", to: ["agent:grok"], content: "翻成人话" }
+    });
+    const closingTurnId = closing.turns[0]!.turnId;
+    // The review handler is still pending, so idle is not reachable here.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // Held: durable and queued, but never prompted while the review runs.
+    expect(fixture.store.getTurn(closingTurnId)).toMatchObject({ status: "queued" });
+    expect(fixture.adapters.grok.prompts).toHaveLength(0);
+
+    reviewRelease.resolve();
+    await waitUntil(() => fixture.store.getTurn(closingTurnId)?.status === "completed");
+    expect(fixture.adapters.grok.prompts).toHaveLength(1);
+
+    // The closing Turn is only dispatched after the review Turn completed.
+    const reviewTerminal = fixture.published.findIndex(
+      (event) => event.type === "turn.completed" && event.actor.actorId === "agent:codex"
+    );
+    const closingDispatch = fixture.published.findIndex(
+      (event) => event.type === "turn.dispatched" && event.to.includes("agent:grok")
+    );
+    expect(reviewTerminal).toBeGreaterThanOrEqual(0);
+    expect(closingDispatch).toBeGreaterThan(reviewTerminal);
+  });
+
+  it("releases a held finish-last Turn once the wait bound elapses", async () => {
+    let now = Date.parse("2026-08-11T00:00:02.000Z");
+    const fixture = createFixture({
+      finishLastActors: new Set(["agent:grok"]),
+      finishLastWaitMs: 60_000,
+      clock: { now: () => new Date(now).toISOString() }
+    });
+    const stuckRelease = deferred();
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await stuckRelease.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "late review" });
+    };
+    await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "stuck-review", to: ["agent:codex"], content: "卡住不返回" }
+    });
+    await waitUntil(() => fixture.adapters.codex.prompts.length === 1);
+    const closing = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "closing", to: ["agent:grok"], content: "翻成人话" }
+    });
+    const closingTurnId = closing.turns[0]!.turnId;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(fixture.store.getTurn(closingTurnId)).toMatchObject({ status: "queued" });
+
+    // Past the bound the hold releases even though the peer is still running.
+    now += 90_000;
+    fixture.broker.notifySessionReady("agent:grok");
+    await waitUntil(() => fixture.store.getTurn(closingTurnId)?.status === "completed", 2_000);
+    expect(fixture.adapters.grok.prompts).toHaveLength(1);
+
+    stuckRelease.resolve();
+    await fixture.broker.waitForIdle();
+  });
+
+  it("does not wait for the Turn that dispatched it (no dispatcher deadlock)", async () => {
+    const fixture = createFixture({ finishLastActors: new Set(["agent:grok"]) });
+    const reviewRelease = deferred();
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await reviewRelease.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "review done" });
+    };
+    const review = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "review", to: ["agent:codex"], content: "审查这一版" }
+    });
+    await waitUntil(() => fixture.store.getTurn(review.turns[0]!.turnId)?.status === "running");
+
+    // The running review Turn is the dispatcher: waiting on it would deadlock.
+    const closing = await fixture.broker.acceptMessage({
+      // The running review Turn dispatches through its own binding.
+      bindingId: "binding:codex",
+      roomId: "room:main",
+      parentTurnId: review.turns[0]!.turnId,
+      correlationId: fixture.store.getTurn(review.turns[0]!.turnId)!.rootCorrelationId,
+      hopCount: 1,
+      request: { clientCommandId: "closing", to: ["agent:grok"], content: "翻成人话" }
+    });
+    await waitUntil(() => fixture.store.getTurn(closing.turns[0]!.turnId)?.status === "completed");
+    expect(fixture.adapters.grok.prompts).toHaveLength(1);
+
+    reviewRelease.resolve();
+    await fixture.broker.waitForIdle();
+  });
+
+  it("runs a finish-last Turn immediately when the room is otherwise idle", async () => {
+    const fixture = createFixture({ finishLastActors: new Set(["agent:grok"]) });
+    const closing = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      roomId: "room:main",
+      request: { clientCommandId: "closing", to: ["agent:grok"], content: "翻成人话" }
+    });
+    await waitUntil(() => fixture.store.getTurn(closing.turns[0]!.turnId)?.status === "completed");
+    expect(fixture.adapters.grok.prompts).toHaveLength(1);
   });
 });

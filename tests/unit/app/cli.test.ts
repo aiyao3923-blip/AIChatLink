@@ -371,6 +371,44 @@ describe("AIChatLink browser setup service", () => {
     ]);
   });
 
+  it("carries the finish-last seat through a setup save untouched", async () => {
+    const written = new Map<string, string>();
+    const target = path.resolve("C:\workspace", "aichatlink.json");
+    written.set(
+      target,
+      JSON.stringify({
+        agents: {
+          codex: { command: "codex", cwd: ".", enabled: true },
+          closer: { driver: "codex", command: "codex", cwd: "closer-work", enabled: true, finishLast: true }
+        }
+      })
+    );
+    const service = new AIChatLinkConfigSetupService({
+      configPath: target,
+      dependencies: setupDependencies(written)
+    });
+
+    const snapshot = await service.snapshot(new AbortController().signal);
+    expect(snapshot.config.agents).toMatchObject([
+      { id: "codex", enabled: true },
+      { id: "closer", finishLast: true }
+    ]);
+
+    // The roster editor edits names only; the seat must survive the save.
+    await service.save(
+      saveRequest(
+        snapshot.config.agents.map((agent) => ({ ...agent, name: `${agent.name ?? agent.id}!` }))
+      ),
+      new AbortController().signal
+    );
+
+    const config = JSON.parse(written.get(target) ?? "{}") as {
+      agents: Record<string, { finishLast?: boolean }>;
+    };
+    expect(config.agents.closer?.finishLast).toBe(true);
+    expect(config.agents.codex?.finishLast).toBeUndefined();
+  });
+
   it("preserves advanced limits and timeouts when the UI edits the roster", async () => {
     const written = new Map<string, string>();
     const target = path.resolve("C:\\workspace", "aichatlink.json");

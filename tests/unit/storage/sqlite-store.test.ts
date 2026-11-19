@@ -313,6 +313,28 @@ describe.sequential("SqliteAIChatLinkStore runtime lifecycle", () => {
 });
 
 describe.sequential("SqliteAIChatLinkStore transactions and idempotency", () => {
+  it("filters Turns by the room of their source event (finish-last gate read)", () => {
+    const fixture = createFixture();
+    const main = fixture.store.acceptMessage(messageInput("room-filter-main"));
+    const other = fixture.store.acceptMessage({
+      ...messageInput("room-filter-other", "hello other"),
+      roomId: "room:other"
+    });
+
+    const mainTurns = fixture.store.listTurns({ roomId: "room:main" });
+    expect(mainTurns.map((turn) => turn.turnId)).toEqual(main.turns.map((turn) => turn.turnId));
+    expect(fixture.store.listTurns({ roomId: "room:other" }).map((turn) => turn.turnId)).toEqual(
+      other.turns.map((turn) => turn.turnId)
+    );
+    expect(
+      fixture.store
+        .listTurns({ roomId: "room:main", status: "queued" })
+        .map((turn) => turn.turnId)
+    ).toEqual(main.turns.map((turn) => turn.turnId));
+    expect(fixture.store.listTurns({ roomId: "room:main", status: "completed" })).toEqual([]);
+    expect(fixture.store.listTurns().length).toBe(main.turns.length + other.turns.length);
+  });
+
   it("D-001 rolls back command, message, queued events and every Turn on a late failure", () => {
     const fixture = createFixture();
     fixture.store.close();

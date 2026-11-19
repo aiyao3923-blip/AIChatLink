@@ -180,6 +180,7 @@ function configToDraft(
       ...(agent.model === undefined || agent.model.length === 0 ? {} : { model: agent.model }),
       ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
       ...(agent.order === undefined ? {} : { order: agent.order }),
+      ...(agent.finishLast === undefined ? {} : { finishLast: agent.finishLast }),
       ...(agent.piConfig === undefined ? {} : { piConfig: agent.piConfig }),
       command: {
         executable: agent.command.executable,
@@ -207,6 +208,7 @@ function draftToDocument(
         ...(agent.model?.trim().length ? { model: agent.model.trim() } : {}),
         ...(agent.thinking === undefined ? {} : { thinking: agent.thinking }),
         ...(agent.order === undefined ? {} : { order: agent.order }),
+        ...(agent.finishLast ? { finishLast: true } : {}),
         ...(agent.piConfig === undefined ? {} : { piConfig: agent.piConfig }),
         command:
           agent.command.prefixArgs.length === 0

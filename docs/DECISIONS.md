@@ -1059,3 +1059,46 @@ MCP 绑定（溯源）与会话（并发写同一 session 文件会互相破坏�
 3. 协议/存储迁移方案；
 4. 新增复杂度和回滚边界；
 5. 更新后的测试与完成标准。
+
+## D-051：收尾席位 `finishLast` —— 人话必须等审查/核验结算
+
+触发证据：用户实测「和总管交流，他去分派任务，但每次审查或核验还没做完，人话就已经完成了任务」。
+核对实现：Turn 队列是**按 Agent lane** FIFO（`turns_target_status_enqueue_idx` + `#runActorPump`），
+不同 Agent 各自独立起跑；`send` 立即入队、`ask` 只等自己那一个目标。于是总管 `send` 审查、再 `send` 人话时，
+人话（flash）几百毫秒就交稿，而审查还在跑命令——D-046 只写了「收尾必须派人话」，没有任何机制保证**先后**。
+这不是总管记性问题：并发是 Broker 的既定语义，提示词约束不了它。
+
+决定：
+
+1. **新增 `agents.<id>.finishLast`（布尔，可选）为收尾席位**，语义是派单而非呈现（与 D-047 的 `order` 相反）：
+   该 Agent 的 Turn 在**同一房间**仍有其它未 terminal Turn 时保持 `queued`，不 claim、不调原生 prompt；
+   其它 Turn 全部 terminal 后由 Broker 自动放行（`#notifyTurnTerminal` 唤醒），
+   所以 `turn.dispatched` 必然晚于上游 `turn.completed`。
+2. **等待集排除派发者自身 Turn 及其祖先链**（`turns.parent_turn_id` 上溯）：上游正在自己的工具调用里
+   等这个 Turn 回答，等它就是自造死锁。这是本决策的核心边界，不是优化。
+3. **有界放行**：`timeouts.finishLastWaitMs`（默认 30 分钟）。到界即放行并 `#report` 一条异常，
+   宁可给一份带缺口的汇报，也不让房间永久停摆；到界路径不静默。
+4. **人话仍是普通 Turn**：消息照常持久化、`queuePosition` 照常可读、可 `cancel`、可 `steer`；
+   只是 claim 晚一点。不新增审批/闸门概念，不改 unrestricted 合同，也不引入第二条访问策略。
+5. **配置随 `/setup` 原样往返**（与 `order` 同一先例）：`AgentDraft` 透传 `finishLast`，
+   一次设置页保存不会把席位抹掉；当前不新增专用开关控件。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 只在总管身份里写「先 ask 再派人话」 | 这次失效的正是提示词层；换模型、换措辞、换压缩上下文就复发 |
+| 让所有 Agent 同批顺序执行 | 会消灭「提案/审查/批判并行」这一房间核心价值，等于用降级换顺序 |
+| 按 `order` 推「最后一个就是收尾位」 | `order` 已明确是纯呈现（D-047），用位置推语义会让改版式就改行为 |
+| 等全部 Turn（含派发者）terminal 才放行人话 | 派发者在自己的工具调用里等人话，双方互等，必然死锁 |
+| 只在人话 prompt 里附「当前还在跑谁」 | 仍靠模型自觉，且 prompt 里的事实会随压缩与延迟失真 |
+| 无上界地等下去 | 一个卡死的 peer 就能永久占住房子的收尾，用户连缺口都拿不到 |
+
+原因：闭环的最后一环是「人话」，它读的是别人的结论。让汇总者与它的证据源赛跑，
+得到的不是并发效率，而是**先交稿后补证据**的假完成——正是 D-046 要防的那类交付。
+
+变更条件：若需要「多个收尾位」或按工作区分开配置，沿用同一字段（等待集按房间计算）；
+若 `finishLast` 在多个实例间造成串行瓶颈，应先证明是房间结构问题，而不是放宽等待语义。
+
+完成标准：`npm run typecheck`、`npm test`（74 文件 / 779 项）全通过；`tests/unit/broker/broker.test.ts`
+新增 4 项（同房持有、到界放行、排除派发者链、空闲立即执行）；`tests/unit/storage` 覆盖
+`listTurns({ roomId })`；`tests/unit/config.test.ts` 与 `tests/unit/app/cli.test.ts`
+各覆盖解析与 `/setup` 往返。

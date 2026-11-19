@@ -82,6 +82,21 @@ const TERMINAL_TURN_STATUSES = new Set<TurnStatus>([
   "interrupted"
 ]);
 
+/**
+ * Statuses that still occupy work in a room. A finish-last Turn waits for all
+ * of them; `queued` counts because a peer that has not been claimed yet is
+ * still ahead of the closing Turn, not behind it.
+ */
+const RUNNING_TURN_STATUSES: readonly TurnStatus[] = [
+  "queued",
+  "dispatching",
+  "running",
+  "cancelling"
+];
+const DEFAULT_FINISH_LAST_WAIT_MS = 1_800_000;
+/** How often a held finish-last Turn re-checks its room while nothing else moves. */
+const FINISH_LAST_RECHECK_MS = 30_000;
+
 const DEFAULT_PARTIAL_CHECKPOINT_CHARS = 4_096;
 const DEFAULT_NATIVE_CANCEL_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
@@ -191,6 +206,9 @@ export class AIChatLinkBroker {
   readonly #idFactory: NonNullable<BrokerDependencies["idFactory"]>;
   readonly #defaultRoomId: string;
   readonly #agentOrder: BrokerDependencies["agentOrder"];
+  readonly #finishLastActors: ReadonlySet<string>;
+  readonly #finishLastWaitMs: number;
+  readonly #finishLastTimers = new Map<string, ReturnType<typeof setTimeout>>();
   readonly #partialCheckpointChars: number;
   readonly #nativeCancelTimeoutMs: number;
   readonly #closeTimeoutMs: number;
@@ -238,6 +256,8 @@ export class AIChatLinkBroker {
     this.#idFactory = dependencies.idFactory ?? createId;
     this.#defaultRoomId = dependencies.defaultRoomId ?? DEFAULT_ROOM_ID;
     this.#agentOrder = dependencies.agentOrder;
+    this.#finishLastActors = dependencies.finishLastActors ?? new Set();
+    this.#finishLastWaitMs = dependencies.finishLastWaitMs ?? DEFAULT_FINISH_LAST_WAIT_MS;
     this.#partialCheckpointChars =
       dependencies.partialCheckpointChars ?? DEFAULT_PARTIAL_CHECKPOINT_CHARS;
     this.#nativeCancelTimeoutMs =
@@ -256,6 +276,9 @@ export class AIChatLinkBroker {
     }
     if (!Number.isSafeInteger(this.#steerLimit) || this.#steerLimit < 1) {
       throw new RangeError("steerLimit must be a positive integer");
+    }
+    if (!Number.isSafeInteger(this.#finishLastWaitMs) || this.#finishLastWaitMs < 1) {
+      throw new RangeError("finishLastWaitMs must be a positive integer");
     }
     if (!Number.isSafeInteger(this.#watchTimeoutMs) || this.#watchTimeoutMs < 1) {
       throw new RangeError("watchTimeoutMs must be a positive integer");
@@ -1542,6 +1565,8 @@ export class AIChatLinkBroker {
 
   async #performClose(): Promise<void> {
     this.#closed = true;
+    for (const timer of this.#finishLastTimers.values()) clearTimeout(timer);
+    this.#finishLastTimers.clear();
     this.#closingController.abort(new AIChatLinkError("TURN_INTERRUPTED", "Broker is closing"));
     for (const active of this.#active.values()) {
       active.controller.abort(new AIChatLinkError("TURN_INTERRUPTED", "Broker is closing"));
@@ -1602,6 +1627,119 @@ export class AIChatLinkBroker {
     }
   }
 
+  /**
+   * Finish-last gate (config: `finishLast`). A closing role must not answer
+   * before the review Turns it reports on have settled, so its Turn is held
+   * while the same room still has other in-flight Turns. The hold is a queue
+   * property, not a client-side courtesy: `send`/`ask` still accept the message
+   * and the Turn stays durable, it simply is not claimed yet.
+   */
+  #deferFinishLastTurn(head: TurnRecord): boolean {
+    if (this.#finishLastActors.size === 0) return false;
+    if (!this.#finishLastActors.has(head.targetActorId)) return false;
+    const blockers = this.#finishLastBlockers(head);
+    if (blockers.length === 0) {
+      this.#clearFinishLastTimer(head.targetActorId);
+      return false;
+    }
+    // Elapsed uses the injected clock so a test (and a replay) sees the same
+    // hold duration the room saw, not the wall clock.
+    const queuedAt = Date.parse(head.queuedAt);
+    const observedAt = Date.parse(this.#clock.now());
+    const elapsed =
+      Number.isFinite(queuedAt) && Number.isFinite(observedAt) ? observedAt - queuedAt : 0;
+    if (elapsed >= this.#finishLastWaitMs) {
+      // Deadlock release: a peer that never settles must not park the closing
+      // Turn forever. Reaching this bound is abnormal and is reported.
+      this.#clearFinishLastTimer(head.targetActorId);
+      this.#report(
+        new AIChatLinkError(
+          "TURN_INTERRUPTED",
+          "Finish-last release bound reached; dispatching while room peers are still running",
+          {
+            turnId: head.turnId,
+            waitedMs: elapsed,
+            blockers: blockers.map((turn) => turn.turnId)
+          }
+        ),
+        { operation: "dispatch", actorId: head.targetActorId, turnId: head.turnId }
+      );
+      return false;
+    }
+    this.#armFinishLastRecheck(head.targetActorId);
+    return true;
+  }
+
+  /** In-flight Turns that a finish-last Turn must wait for. */
+  #finishLastBlockers(head: TurnRecord): TurnRecord[] {
+    const source = this.#store.getEvent(head.sourceEventId);
+    if (!source) return [];
+    const callerChain = this.#callerChain(head);
+    const blockers: TurnRecord[] = [];
+    for (const status of RUNNING_TURN_STATUSES) {
+      for (const turn of this.#store.listTurns({ roomId: source.roomId, status })) {
+        if (turn.turnId === head.turnId) continue;
+        if (turn.targetActorId === head.targetActorId) continue;
+        // The dispatcher is inside its own tool call waiting for this Turn;
+        // waiting on it would deadlock the room.
+        if (callerChain.has(turn.turnId)) continue;
+        blockers.push(turn);
+      }
+    }
+    return blockers;
+  }
+
+  /** `head` plus the `parent_turn_id` chain that dispatched it. */
+  #callerChain(head: TurnRecord): Set<string> {
+    const chain = new Set<string>([head.turnId]);
+    let cursor = head.parentTurnId;
+    for (let hops = 0; cursor !== undefined && hops < 64; hops += 1) {
+      if (chain.has(cursor)) break;
+      chain.add(cursor);
+      cursor = this.#store.getTurn(cursor)?.parentTurnId;
+    }
+    return chain;
+  }
+
+  /** Re-check a held lane even when no peer Turn settles (bounded by the wait). */
+  #armFinishLastRecheck(actorId: string): void {
+    if (this.#closed || this.#finishLastTimers.has(actorId)) return;
+    const timer = setTimeout(() => {
+      this.#finishLastTimers.delete(actorId);
+      if (!this.#closed) this.#scheduleActor(actorId);
+    }, Math.min(FINISH_LAST_RECHECK_MS, this.#finishLastWaitMs));
+    timer.unref?.();
+    this.#finishLastTimers.set(actorId, timer);
+  }
+
+  #clearFinishLastTimer(actorId: string): void {
+    const timer = this.#finishLastTimers.get(actorId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.#finishLastTimers.delete(actorId);
+  }
+
+  /**
+   * A settled Turn can release a held finish-last Turn in the same room. Only
+   * finish-last lanes are re-scheduled here; ordinary lanes keep their own
+   * per-Actor FIFO pacing.
+   */
+  #wakeFinishLastActors(terminalTurnId: string): void {
+    if (this.#finishLastActors.size === 0 || this.#closed) return;
+    try {
+      const turn = this.#store.getTurn(terminalTurnId);
+      if (!turn) return;
+      const source = this.#store.getEvent(turn.sourceEventId);
+      const roomId = source?.roomId ?? this.#defaultRoomId;
+      for (const queued of this.#store.listTurns({ roomId, status: "queued" })) {
+        if (!this.#finishLastActors.has(queued.targetActorId)) continue;
+        this.#scheduleActor(queued.targetActorId);
+      }
+    } catch (error) {
+      this.#report(error, { operation: "dispatch" });
+    }
+  }
+
   async #prepareNext(actorId: string): Promise<DispatchPreparation | undefined> {
     while (!this.#closed) {
       const head = this.#store.listTurns({ status: "queued", targetActorId: actorId })[0];
@@ -1610,6 +1748,10 @@ export class AIChatLinkBroker {
         await this.#failQueuedTransportMismatch(head, "persisted_transport_mismatch");
         continue;
       }
+      // Finish-last seats are held until the room's other in-flight Turns are
+      // terminal. Returning undefined parks just this lane: the deposit stays
+      // durable and a peer's terminal event (or the bounded re-check) wakes it.
+      if (this.#deferFinishLastTurn(head)) return undefined;
       const adapter = this.#adapters.getByActor(actorId);
       let session: NativeSession;
       try {
@@ -2483,6 +2625,7 @@ export class AIChatLinkBroker {
       ...(turn === undefined ? {} : { status: turn.status })
     });
     const listeners = this.#turnWaiters.get(turnId);
+    this.#wakeFinishLastActors(turnId);
     if (!listeners) return;
     for (const listener of [...listeners]) listener();
   }

@@ -159,6 +159,7 @@ function config(transport: "direct" | "structured"): AIChatLinkConfig {
       cancelMs: 100,
       closeMs: 500,
       askMs: 100,
+      finishLastWaitMs: 1_800_000,
       watchMs: 100
     }
   };

@@ -259,6 +259,45 @@ describe("AIChatLink configuration", () => {
     expect(partialConfig.agents.codex!.cwd).toBe(path.join(partial.directory, "codex-work"));
   });
 
+  it("parses the finish-last seat and its bounded wait", async () => {
+    const file = await writeConfig({
+      agents: {
+        codex: { command: "codex", cwd: ".", enabled: true },
+        closer: {
+          driver: "claude",
+          command: "claude",
+          cwd: ".",
+          enabled: true,
+          finishLast: true
+        }
+      },
+      timeouts: { finishLastWaitMs: 90_000 }
+    });
+    const config = await loadConfig(file.configPath, process.cwd(), commandDependencies());
+
+    expect(config.agents.closer!.finishLast).toBe(true);
+    expect(config.agents.codex!.finishLast).toBeUndefined();
+    expect(config.timeouts.finishLastWaitMs).toBe(90_000);
+
+    const defaults = await writeConfig({
+      agents: { codex: { command: "codex", cwd: ".", enabled: true } }
+    });
+    const defaulted = await loadConfig(
+      defaults.configPath,
+      process.cwd(),
+      commandDependencies()
+    );
+    expect(defaulted.timeouts.finishLastWaitMs).toBe(1_800_000);
+
+    const invalid = await writeConfig({
+      agents: { codex: { command: "codex", cwd: ".", enabled: true } },
+      timeouts: { finishLastWaitMs: 10 }
+    });
+    await expect(
+      loadConfig(invalid.configPath, process.cwd(), commandDependencies())
+    ).rejects.toMatchObject({ code: "INVALID_ENVELOPE" });
+  });
+
   it("rejects non-loopback hosts", async () => {
     const input = validConfig();
     input.server = { host: "0.0.0.0", port: 4_310 };

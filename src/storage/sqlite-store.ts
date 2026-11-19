@@ -2074,30 +2074,38 @@ export class SqliteAIChatLinkStore implements AIChatLinkStore {
     targetActorId?: string;
     rootCorrelationId?: string;
     sourceEventId?: string;
+    roomId?: string;
   } = {}): TurnRecord[] {
     this.#assertOpen();
     const predicates: string[] = [];
     const parameters: string[] = [];
     if (input.status !== undefined) {
-      predicates.push("status = ?");
+      predicates.push("turn.status = ?");
       parameters.push(input.status);
     }
     if (input.targetActorId !== undefined) {
-      predicates.push("target_actor_id = ?");
+      predicates.push("turn.target_actor_id = ?");
       parameters.push(input.targetActorId);
     }
     if (input.rootCorrelationId !== undefined) {
-      predicates.push("root_correlation_id = ?");
+      predicates.push("turn.root_correlation_id = ?");
       parameters.push(input.rootCorrelationId);
     }
     if (input.sourceEventId !== undefined) {
-      predicates.push("source_event_id = ?");
+      predicates.push("turn.source_event_id = ?");
       parameters.push(input.sourceEventId);
+    }
+    if (input.roomId !== undefined) {
+      predicates.push("source.room_id = ?");
+      parameters.push(input.roomId);
     }
     const where = predicates.length === 0 ? "" : `WHERE ${predicates.join(" AND ")}`;
     return (
       this.#database
-        .prepare(`SELECT * FROM turns ${where} ORDER BY enqueue_seq, turn_id`)
+        .prepare(
+          `SELECT turn.* FROM turns turn JOIN events source ON source.event_id = turn.source_event_id ` +
+            `${where} ORDER BY turn.enqueue_seq, turn.turn_id`
+        )
         .all(...parameters) as Row[]
     ).map(mapTurn);
   }

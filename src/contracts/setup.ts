@@ -54,6 +54,11 @@ export const SetupAgentDraftSchema = z
     thinking: SetupAgentThinkingSchema.optional(),
     /** Roster position in the room header; presentation only. */
     order: z.number().int().min(0).max(9_999).optional(),
+    /**
+     * Finish-last seat: this Agent's Turn waits until the room's other in-flight
+     * Turns are terminal. Dispatch semantics, unlike `order`.
+     */
+    finishLast: z.boolean().optional(),
     /** pi only: share the user's own pi config instead of the isolated copy. */
     piConfig: z.enum(["isolated", "shared"]).optional(),
     command: SetupCommandDraftSchema,

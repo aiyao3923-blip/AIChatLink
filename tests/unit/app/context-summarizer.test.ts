@@ -125,6 +125,7 @@ describe("FirstAvailableAgentSummarizer", () => {
         cancelMs: 100,
         closeMs: 100,
         askMs: 100,
+        finishLastWaitMs: 1_800_000,
         watchMs: 100
       }
     };
@@ -195,6 +196,7 @@ describe("FirstAvailableAgentSummarizer", () => {
         cancelMs: 100,
         closeMs: 100,
         askMs: 100,
+        finishLastWaitMs: 1_800_000,
         watchMs: 100
       }
     };
@@ -253,6 +255,7 @@ describe("FirstAvailableAgentSummarizer", () => {
       timeouts: {
         handshakeMs: 100, requestMs: 100, firstEventMs: 100, idleMs: 100,
         cancelMs: 100, closeMs: 100, askMs: 100,
+        finishLastWaitMs: 1_800_000,
         watchMs: 100
       }
     };
@@ -298,6 +301,7 @@ describe("FirstAvailableAgentSummarizer", () => {
       timeouts: {
         handshakeMs: 100, requestMs: 100, firstEventMs: 100, idleMs: 100,
         cancelMs: 100, closeMs: 100, askMs: 100,
+        finishLastWaitMs: 1_800_000,
         watchMs: 100
       }
     };
@@ -360,6 +364,7 @@ describe("OwningAgentDatedMemorySummarizer", () => {
       cancelMs: 100,
       closeMs: 100,
       askMs: 100,
+        finishLastWaitMs: 1_800_000,
         watchMs: 100
     }
   };
