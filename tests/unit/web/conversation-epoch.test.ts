@@ -5,7 +5,8 @@ import {
   activeEpochStartSeq,
   epochStartAfterReset,
   eventInEpoch,
-  turnActivityState
+  turnActivityState,
+  visibleConversations
 } from "../../../web/conversation-epoch.js";
 
 describe("conversation epochs", () => {
@@ -44,5 +45,42 @@ describe("conversation epochs", () => {
     expect(turnActivityState("turn.cancelled")).toBe("terminal");
     expect(turnActivityState("turn.completed")).toBe("terminal");
     expect(turnActivityState("message.created")).toBeNull();
+  });
+});
+
+describe("visible conversations", () => {
+  const open = { id: "open", empty: true };
+  const older = { id: "older", empty: false };
+  const oldest = { id: "oldest", empty: false };
+
+  it("keeps the empty open epoch when it is the only row", () => {
+    // Fresh room, or every other conversation was deleted: the operator still
+    // needs to see the conversation the next send lands in.
+    expect(visibleConversations([open])).toEqual([open]);
+  });
+
+  it("hides the empty open epoch once a real conversation survives", () => {
+    // This is the delete case: painting the empty row would rename it on every
+    // unrelated delete and read as a brand-new conversation.
+    expect(visibleConversations([open, older])).toEqual([older]);
+    expect(visibleConversations([older, open])).toEqual([older]);
+  });
+
+  it("keeps every non-empty row in list order", () => {
+    expect(visibleConversations([open, older, oldest])).toEqual([older, oldest]);
+    expect(visibleConversations([older, open, oldest])).toEqual([older, oldest]);
+  });
+
+  it("does not drop a row when the whole group is empty", () => {
+    const another = { id: "another", empty: true };
+    expect(visibleConversations([open, another])).toEqual([open, another]);
+  });
+
+  it("returns a copy so callers cannot mutate the source list", () => {
+    const source = [open, older];
+    const result = visibleConversations(source);
+    expect(result).not.toBe(source);
+    result.pop();
+    expect(source).toHaveLength(2);
   });
 });

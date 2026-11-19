@@ -4,7 +4,8 @@ import {
   activeEpochStartSeq,
   epochStartAfterReset,
   eventInEpoch,
-  turnActivityState
+  turnActivityState,
+  visibleConversations
 } from "./conversation-epoch.js";
 import { compareRosterOrder, disabledConfiguredActorIds, pendingConfiguredAgents } from "./agent-roster.js";
 import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./empty-voice.js";
@@ -3357,6 +3358,10 @@ function renderConversationGroup(
   workspace: WorkspaceView | null,
   items: ConversationSummary[]
 ): void {
+  // The open epoch is a boundary, not history: paint it only when the group has
+  // nothing else. Otherwise deleting a row silently renames it into the “new”
+  // conversation the operator did not ask for (see D-060).
+  const visible = visibleConversations(items);
   const group = document.createElement("section");
   group.className = "workspace-group";
   const workspaceId = workspace?.workspaceId ?? primaryWorkspaceId;
@@ -3399,10 +3404,10 @@ function renderConversationGroup(
     count.className = "workspace-group-count";
     // Only what the group actually shows: a directory whose conversations were
     // all deleted must not keep advertising the old total. Empty means no number.
-    if (items.length === 0) {
+    if (visible.length === 0) {
       count.hidden = true;
     } else {
-      count.textContent = String(items.length);
+      count.textContent = String(visible.length);
     }
     switchButton.append(dot, label, pathLabel, count);
     switchButton.addEventListener("click", () => {
@@ -3459,13 +3464,14 @@ function renderConversationGroup(
   list.className = "conversation-list";
   list.setAttribute("aria-label", workspace === null ? "对话列表" : `${workspace.label} 的对话`);
   if (workspace !== null) list.id = `workspace-conversations-${workspace.workspaceId}`;
-  // Every epoch the broker returns is shown, including the open one that has no
-  // message yet: it is the conversation the next send lands in, and it carries
-  // the `对话 N` number. Closed boundary artifacts never reach the client.
-  for (const conversation of items) {
+  // Closed boundary artifacts never reach the client. The empty open epoch is
+  // rendered only when it is the group's only row (fresh room, or every other
+  // conversation was deleted); otherwise it would be the “new conversation”
+  // that appears after any unrelated delete.
+  for (const conversation of visible) {
     list.append(createConversationItem(workspaceId, conversation));
   }
-  if (items.length === 0) {
+  if (visible.length === 0) {
     const empty = document.createElement("li");
     empty.className = "workspace-group-empty";
     empty.textContent = workspace === null ? "还没有对话" : "这个工作目录还没有对话";
@@ -3586,10 +3592,21 @@ function createConversationItem(workspaceId: string, conversation: ConversationS
   return item;
 }
 
+/** Drop a deleted row from the local projection before the next paint can rebuild it. */
+function forgetConversationLocally(workspaceId: string, conversationId: string): void {
+  const strip = (items: readonly ConversationSummary[]): ConversationSummary[] =>
+    items.filter((item) => item.conversationId !== conversationId);
+  const scoped = conversationsByWorkspace.get(workspaceId);
+  if (scoped !== undefined) conversationsByWorkspace.set(workspaceId, strip(scoped));
+  if (workspaceId === activeWorkspaceId) conversations = strip(conversations);
+  renderConversations();
+}
+
 /**
  * Deleting a conversation removes it from the local database: the confirmation
- * is explicit about that, and the sidebar only drops the row after the server
- * acknowledged the purge.
+ * is explicit about that, and the row leaves the sidebar in the same click that
+ * the server acknowledged. A second click on a stale row is treated as the same
+ * delete, not as an error to paint in red.
  */
 async function deleteConversation(
   workspaceId: string,
@@ -3615,27 +3632,37 @@ async function deleteConversation(
         resetNativeSessions: true
       })
     });
-    if (conversationView?.conversation.conversationId === conversation.conversationId) {
-      // The replay on screen is gone; a reload rebuilds every range and token.
-      exitConversationView();
+  } catch (error) {
+    // A stale row can be clicked twice. “The conversation is already gone” is
+    // the second click's receipt, not a failure worth a red banner.
+    if (!(error instanceof ApiFailure && error.code === "UNKNOWN_TARGET")) {
+      showGlobalError(errorMessage(error));
+      trigger.disabled = false;
+      trigger.title = "删除这条对话（永久）";
       return;
     }
-    await refreshConversations(workspaceId);
-    if (
-      conversation.active &&
-      conversationView === null &&
-      workspaceId === onScreenWorkspaceId()
-    ) {
-      // The server closed the open epoch; follow the fresh one so the live
-      // timeline cannot keep showing the conversation that was just deleted. A
-      // replayed history on screen stays where it is until the operator leaves.
-      const active = conversations.find((candidate) => candidate.active);
-      if (active !== undefined) openConversationEpoch(active.startSeq);
-    }
-  } catch (error) {
-    showGlobalError(errorMessage(error));
-    trigger.disabled = false;
-    trigger.title = "删除这条对话（永久）";
+  }
+  // The POST already returned (or the server had already purged it): drop the
+  // row before the next render can rebuild it from the stale list.
+  forgetConversationLocally(workspaceId, conversation.conversationId);
+  if (conversationView?.conversation.conversationId === conversation.conversationId) {
+    exitConversationView();
+  } else if (
+    new URL(window.location.href).searchParams.get("conv") === conversation.conversationId
+  ) {
+    syncViewedConversationParam(null);
+  }
+  await refreshConversations(workspaceId);
+  if (
+    conversation.active &&
+    conversationView === null &&
+    workspaceId === onScreenWorkspaceId()
+  ) {
+    // The server closed the open epoch; follow the fresh one so the live
+    // timeline cannot keep showing the conversation that was just deleted. A
+    // replayed history on screen stays where it is until the operator leaves.
+    const active = conversations.find((candidate) => candidate.active);
+    if (active !== undefined) openConversationEpoch(active.startSeq);
   }
 }
 
@@ -5933,6 +5960,9 @@ async function bootstrap(): Promise<void> {
     if (conversationId !== null && conversationId.length > 0) {
       const target = conversations.find((conversation) => conversation.conversationId === conversationId);
       if (target === undefined) {
+        // The row was deleted (possibly from another tab). Keep the address bar
+        // honest so a reload does not keep re-opening the dead id.
+        syncViewedConversationParam(null);
         showGlobalError("该对话不存在，或已被删除。");
       } else if (!target.active) {
         void enterConversationView(target);

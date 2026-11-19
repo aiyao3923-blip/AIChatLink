@@ -445,7 +445,8 @@ export class AIChatLinkBroker {
       // two resets in a row, or a reset immediately followed by a resume. There
       // is no transcript to show, so it does not become a conversation. The
       // open epoch stays in the list (it carries the live epoch start) but is
-      // flagged `empty`, so the sidebar only shows it once it has content.
+      // flagged `empty`: the sidebar hides it while any other row survives, and
+      // shows it only when it is the group's last row (D-060).
       if (endSeq !== null && !hasMessages) {
         continue;
       }

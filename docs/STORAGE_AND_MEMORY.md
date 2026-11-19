@@ -390,7 +390,7 @@ D-043 让「删除对话」变成真正的本地清除。事件行会消失，`s
 
 回合可能跨出它所在的纪元：reset 落在回合运行中，或子回合在边界之后才入队。这些回合的 `body.turnId` 命中清除集合时，它自己的 `turn.*` / `tool.progress.recorded` 事件即使在区间之后也一并删除，避免留下没有回合的终态卡片。
 
-`context_resets` 不删：纪元边界保持不变，`conversationId=conv:<startSeq>` 因此不会被后来的纪元复用。删除活动纪元时，broker 先走一次普通 reset（`context.reset` + 可选 `restartFresh`）再清除旧区间，房间随后剩一个空的开放纪元；空纪元在 `/api/conversations` 里带 `empty:true`，侧栏不渲染它。
+`context_resets` 不删：纪元边界保持不变，`conversationId=conv:<startSeq>` 因此不会被后来的纪元复用。删除活动纪元时，broker 先走一次普通 reset（`context.reset` + 可选 `restartFresh`）再清除旧区间，房间随后剩一个空的开放纪元；空纪元在 `/api/conversations` 里带 `empty:true`，侧栏在有其他对话时隐藏它，全删光后才作为 `对话 1` 出现（D-060）。
 
 记忆是独立数据类：已写下的 core / dated 记忆内容不因删除对话而消失，只失去指向被删事件的来源指针；需要清除记忆时按 §11 的记忆操作单独处理。
 

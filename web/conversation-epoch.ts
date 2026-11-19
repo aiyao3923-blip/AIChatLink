@@ -38,6 +38,26 @@ export function activeEpochStartSeq(epochs: readonly ConversationEpoch[]): numbe
   return FIRST_EPOCH_START_SEQ;
 }
 
+/** The row fields the sidebar needs to decide whether an epoch is worth showing. */
+export interface ConversationVisibility {
+  readonly empty: boolean;
+}
+
+/**
+ * The open epoch is where the next send lands, but it is not history. Show it
+ * only while it is the whole group: once a real conversation survives, an empty
+ * open row gets a new `对话 N` every time another row is deleted, so the row the
+ * operator did not delete looks like a brand-new conversation. The API still
+ * projects the live boundary; this only decides which rows the sidebar paints.
+ */
+export function visibleConversations<T extends ConversationVisibility>(
+  items: readonly T[]
+): T[] {
+  if (items.length <= 1) return [...items];
+  const survivors = items.filter((item) => !item.empty);
+  return survivors.length === 0 ? [...items] : survivors;
+}
+
 /** `context.reset` closes the previous epoch at `throughSeq`; the next one starts right after it. */
 export function epochStartAfterReset(throughSeq: number): number {
   if (!Number.isSafeInteger(throughSeq) || throughSeq < 0) {
