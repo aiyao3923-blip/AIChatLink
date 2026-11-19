@@ -322,6 +322,7 @@ const themeToggle = byId<HTMLButtonElement>("theme-toggle");
 const sidebarToggle = byId<HTMLButtonElement>("sidebar-toggle");
 const conversationGroups = byId<HTMLDivElement>("conversation-groups");
 const newConversationButton = byId<HTMLButtonElement>("new-conversation");
+const newRoomButton = byId<HTMLButtonElement>("new-room");
 const conversationTocButton = byId<HTMLButtonElement>("conversation-toc");
 const conversationTocPanel = byId<HTMLElement>("conversation-toc-panel");
 const conversationTocList = byId<HTMLOListElement>("conversation-toc-list");
@@ -3648,18 +3649,31 @@ function renderWorkspaceSwitcher(): void {
   }
 }
 
-function openWorkspaceDialog(): void {
+function openWorkspaceDialog(hint?: string): void {
   if (workspaceDialog.open) return;
   renderWorkspaceSwitcher();
   workspaceListing = null;
   workspaceShortcuts.replaceChildren();
   workspaceEntries.replaceChildren();
   workspaceUse.disabled = true;
-  workspaceDialogStatus.textContent = "";
+  workspaceDialogStatus.textContent = hint ?? "";
   if (typeof workspaceDialog.showModal === "function") workspaceDialog.showModal();
   else workspaceDialog.setAttribute("open", "");
   const active = currentWorkspace();
   void loadWorkspaceListing(active?.path ?? workspaceResolved);
+}
+
+/**
+ * "New room" is a different act from "new conversation": it starts an
+ * independent runtime (its own database, room, and Agent processes) for another
+ * directory, so the room that is currently working keeps working. The directory
+ * dialog already does exactly that — it just needed to be reachable from the
+ * sidebar instead of only from the composer.
+ */
+function startNewRoom(): void {
+  openWorkspaceDialog(
+    "选择一个目录：它会在新的房间里独立运行，正在进行的对话不受影响。"
+  );
 }
 
 function closeWorkspaceDialog(): void {
@@ -3797,9 +3811,18 @@ async function startNewConversation(target?: WorkspaceView): Promise<void> {
   const workspaceId = target?.workspaceId ?? activeWorkspaceId;
   const elsewhere = target !== undefined && workspaceId !== activeWorkspaceId;
   const scope = elsewhere ? `在「${target.label}」` : "";
+  const running = elsewhere ? 0 : runningTurnCount();
+  // A new conversation *terminates* this room's work: the Broker replaces every
+  // native session. The confirmation has to say that out loud, not hide behind
+  // "上下文会重置".
+  const termination = elsewhere
+    ? "\n\n注意：该工作目录下正在运行的任务会被终止，未完成的回复会丢失。"
+    : running > 0
+      ? `\n\n注意：当前有 ${running} 个任务正在运行，继续会终止它们，未完成的回复会丢失。`
+      : "";
   const confirmText = elsewhere
-    ? `${scope}开始新对话？这个工作目录的当前上下文会重置，历史对话仍可在左侧查看。`
-    : "开始新对话？当前上下文会重置，历史对话仍可在左侧查看。";
+    ? `${scope}开始新对话？这个工作目录的当前上下文会重置，历史对话仍可在左侧查看。${termination}`
+    : `开始新对话？当前上下文会重置，历史对话仍可在左侧查看。${termination}`;
   if (!window.confirm(confirmText)) return;
   newConversationButton.disabled = true;
   try {
@@ -4855,6 +4878,15 @@ function workingActorIds(): string[] {
   return activeTurnActorIds(state.turns.values(), { releasedTurnIds });
 }
 
+/** Turns in this view that have not reached a terminal status (what a reset ends). */
+function runningTurnCount(): number {
+  let count = 0;
+  for (const turn of state.turns.values()) {
+    if (!TERMINAL_TURN_STATUSES.has(turn.status)) count += 1;
+  }
+  return count;
+}
+
 /** The current conversation, not another workspace or a replayed history. */
 function isRoomWorking(): boolean {
   return conversationView === null && workingActorIds().length > 0;
@@ -5795,6 +5827,10 @@ newConversationButton.addEventListener("click", () => {
   void startNewConversation();
 });
 
+newRoomButton.addEventListener("click", () => {
+  startNewRoom();
+});
+
 document.addEventListener("click", (event) => {
   if (workspaceMenuElement === null) return;
   const target = event.target as Node | null;
@@ -6172,7 +6208,7 @@ assistantInput.addEventListener("input", () => {
   syncAssistantSendButton();
 });
 
-composerWorkspace.addEventListener("click", openWorkspaceDialog);
+composerWorkspace.addEventListener("click", () => openWorkspaceDialog());
 workspaceClose.addEventListener("click", closeWorkspaceDialog);
 workspaceUp.addEventListener("click", () => {
   const parent = workspaceListing?.parent;

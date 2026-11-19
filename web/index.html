@@ -99,13 +99,22 @@
               <p class="eyebrow">Conversations</p>
               <h2 id="conversations-heading">对话</h2>
             </div>
-            <button
-              id="new-conversation"
-              class="new-conversation"
-              type="button"
-              title="开始一个新对话"
-              aria-label="开始一个新对话"
-            >＋</button>
+            <div class="conversation-heading-actions">
+              <button
+                id="new-conversation"
+                class="new-conversation is-labeled"
+                type="button"
+                title="新开对话：重置当前房间的上下文，历史对话仍可在左侧查看"
+                aria-label="新开对话：重置当前房间上下文"
+              >＋ 对话</button>
+              <button
+                id="new-room"
+                class="new-conversation is-labeled"
+                type="button"
+                title="新开房间：选择另一个工作目录，独立运行，不影响正在进行的对话"
+                aria-label="新开房间：选择另一个工作目录"
+              >＋ 房间</button>
+            </div>
           </div>
           <div
             id="conversation-groups"

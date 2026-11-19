@@ -3118,6 +3118,22 @@
   cursor: default;
 }
 
+/* Two explicit actions replace the one ambiguous ＋: a new *conversation* resets
+   this room, a new *room* is an independent runtime. They must not look alike. */
+.conversation-heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+.new-conversation.is-labeled {
+  width: auto;
+  padding: 0 8px;
+  font-size: var(--fs-11);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .conversation-list {
   display: flex;
   flex-direction: column;
