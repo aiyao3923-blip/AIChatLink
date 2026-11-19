@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   TERMINAL_TURN_STATUSES,
   activeTurnActorIds,
+  cancellableTurnIds,
   isFinishedTransition,
   isTerminalTurnStatus
 } from "../../../web/agent-activity.js";
@@ -58,5 +59,45 @@ describe("turn activity", () => {
     expect(isFinishedTransition("completed", "completed")).toBe(false);
     expect(isFinishedTransition("failed", "completed")).toBe(false);
     expect(isFinishedTransition("running", "streaming")).toBe(false);
+  });
+});
+
+describe("stop-everything target set", () => {
+  it("keeps every non-terminal Turn, in first-seen order", () => {
+    expect(
+      cancellableTurnIds([
+        { turnId: "turn:a", targetActorId: "agent:one", status: "running" },
+        { turnId: "turn:b", targetActorId: "agent:two", status: "queued" },
+        { turnId: "turn:c", targetActorId: "agent:three", status: "dispatching" }
+      ])
+    ).toEqual(["turn:a", "turn:b", "turn:c"]);
+  });
+
+  it("skips terminal Turns and Turns already asked to cancel", () => {
+    expect(
+      cancellableTurnIds([
+        { turnId: "turn:done", targetActorId: "agent:one", status: "completed" },
+        { turnId: "turn:asked", targetActorId: "agent:two", status: "cancel_requested" },
+        { turnId: "turn:cancelling", targetActorId: "agent:two", status: "cancelling" },
+        { turnId: "turn:fail", targetActorId: "agent:three", status: "failed" },
+        { turnId: "turn:wip", targetActorId: "agent:four", status: "running" }
+      ])
+    ).toEqual(["turn:cancelling", "turn:wip"]);
+  });
+
+  it("drops blank and duplicated ids so one click is one command per Turn", () => {
+    expect(
+      cancellableTurnIds([
+        { turnId: "  ", targetActorId: "agent:one", status: "running" },
+        { turnId: " turn:x ", targetActorId: "agent:one", status: "running" },
+        { turnId: "turn:x", targetActorId: "agent:one", status: "streaming" }
+      ])
+    ).toEqual(["turn:x"]);
+  });
+
+  it("still cancels a Turn in an unknown status (fail-safe, same rule as the lock)", () => {
+    expect(
+      cancellableTurnIds([{ turnId: "turn:paused", targetActorId: "agent:one", status: "paused" }])
+    ).toEqual(["turn:paused"]);
   });
 });

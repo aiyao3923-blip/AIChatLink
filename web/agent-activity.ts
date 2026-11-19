@@ -53,3 +53,30 @@ export function activeTurnActorIds(turns: Iterable<TurnActivityLike>): string[] 
 export function isFinishedTransition(previous: string | undefined, next: string): boolean {
   return previous !== undefined && !isTerminalTurnStatus(previous) && isTerminalTurnStatus(next);
 }
+
+export interface CancellableTurnLike extends TurnActivityLike {
+  readonly turnId: string;
+}
+
+/**
+ * Turns a "stop everything" click has to reach, in first-seen order.
+ *
+ * Terminal Turns are already done and `cancel_requested` ones already asked, so
+ * a second click re-sends nothing: the Broker's per-Turn cancel is idempotent by
+ * `(bindingId, clientCommandId)`, and burning one command per finished Turn
+ * would only produce noise in the receipts. Unknown statuses are *not* terminal,
+ * so a Turn in a state this build does not know is still cancelled (fail-safe,
+ * same rule as the busy lock).
+ */
+export function cancellableTurnIds(turns: Iterable<CancellableTurnLike>): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  for (const turn of turns) {
+    const turnId = turn.turnId.trim();
+    if (turnId.length === 0 || seen.has(turnId)) continue;
+    if (isTerminalTurnStatus(turn.status) || turn.status === "cancel_requested") continue;
+    seen.add(turnId);
+    ids.push(turnId);
+  }
+  return ids;
+}

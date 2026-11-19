@@ -1050,6 +1050,55 @@ MCP 绑定（溯源）与会话（并发写同一 session 文件会互相破坏�
 `emulateMedia(reducedMotion:'reduce')` 下环 `animation-duration` 为 `2.4s`、`iteration-count: infinite`、
 `getAnimations()` 有 1 条 `running`；`.send-spinner` 同为 2.4s。
 
+## D-050：忙碌的发送键就是终止键（取代 D-044 第 3 条的「禁用」）
+
+触发证据：2026-11-19 用户要求「完成对话时发送按键变成了转圈，我希望点击转圈后代表用户要终止此次任务，
+立刻终止所有 agent 的工作」。D-044 第 3 条把「转圈并 `disabled`」写成了决策，因此这里显式取代该条，
+D-044 的其余部分（忙碌口径 = 当前视图未终态 Turn、活动栏不是第二名册、完成点只来自 live 跃迁、
+`state.turns` 单一事实源）全部保留。
+
+决定：
+
+1. **一个按钮，两种模式**：`web/composer-state.ts` 的纯函数 `sendButtonState()` 决定
+   `send | stop | blocked`，DOM 只做投影（`data-mode`、`label`、`title`、`aria-label`、`aria-busy`）。
+   `stop` 模式**可点且不禁用**，`aria-busy=false`（它是可操作的，不是阻塞的）。
+2. **点击 = 终止当前对话里全部未终态 Turn**：`cancellableTurnIds(state.turns.values())` 过滤掉
+   终态与已 `cancel_requested` 的 Turn，再并行逐 Turn 发既有 `POST /api/turns/:id/cancel`，
+   每条带自己的 `clientCommandId`（`cancel:<turnId>`）。**不新增端点**：Broker 的 `cancelTurn`
+   本身就是逐 Turn 幂等命令，批量端点只会多一层「部分成功」语义。
+3. **Enter 不终止**：终止只绑在 `sendButton` 的 `click` 上并 `preventDefault()`；`submit` 事件
+   仍走 `submitMessage()` 的原守卫（忙碌时只给文案）。忙碌时误按 Enter 不得终止 8 个 Agent。
+4. **终止中与重复点击**：扇出期间 `stopping=true` 暂时禁用；扇出结束后若仍有未终态 Turn，
+   按钮回到可点状态，但所有 Turn 已 `cancel_requested`，再点只会给出「已请求终止，等待 Agent 收尾」，
+   不发第二条命令（幂等靠 `cancellableTurnIds()` + Broker 的 `(bindingId, clientCommandId)` receipt）。
+5. **失败可见且可重试**：N 条失败折成一句「N 个取消失败：<code>；可再次点击重试」，走 `is-error`
+   （输入变化才清）；成功的确认语在按钮离开 `stop` 模式时自动清空。
+6. **不自动补发、不审批**：`turn.cancelled` 后不重放 prompt（不变量 14），终止前不弹确认框，
+   卡片级「取消」按钮保留（单 Turn 粒度仍然存在）。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 新增 `POST /api/turns/cancel-all` | 多一层部分成功语义；逐 Turn 幂等命令已足够，且离线重放更简单 |
+| 在 `submitMessage()` 里做终止 | 忙碌时按 Enter 会连坐终止全部 Agent |
+| 忙碌时保留禁用，另加一个「停止」按钮 | 用户明确要求点转圈；两个并列控件会让操作条更挤 |
+| 终止前弹 `confirm` | 终止可恢复（Turn 记 `cancelled`，消息可重发），与「无审批层」冲突 |
+| 乐观把 Turn 标成 `cancelled` | 终态必须由 Broker/native 事件决定，否则会出现「UI 已停、进程还在跑」 |
+| 用 `conversationView !== null` 也允许终止 | 历史回放里没有活 Turn，且 `isRoomWorking()` 已排除该场景 |
+
+原因：忙碌态的手势语义应该是「我不要再等了」，而不是「请告诉我不能做任何事」。把同一个控件从
+状态变成命令，用户不必先把视线移到卡片去找「取消」，也不必逐个点 8 次。
+
+变更条件：若用户实际想要「只终止我刚发的那一轮」，改为按 `correlationId` 过滤（`cancellableTurnIds`
+加一个谓词即可，逻辑集中在一处）；若将来 Broker 提供批量取消且能返回逐 Turn 结果，可替换扇出，
+但必须保留相同的逐 Turn 幂等与错误聚合；若引入 `Esc` 快捷键，必须先解决输入法组合态与草稿场景。
+
+完成标准：`npm run typecheck`、`npx vitest run`（含新增 `composer-state` 8 项与
+`agent-activity` 的 `cancellableTurnIds` 4 项）、`npm run build` 全通过；无头 Chrome 探针
+（`web/` 静态桩，不入库）：3 个在飞 Turn 时按钮 `data-mode=stop` 且可点、文案「终止」、
+`aria-label` 含「终止全部 3 个 Agent」；点击后恰好 3 条 `POST /api/turns/<id>/cancel` 且
+`clientCommandId` 互不相同；再点一次命令数仍为 3；忙碌时按 Enter 产生 0 条取消请求；
+全部终态后按钮回到「发送」/`blocked` 且状态槽清空。
+
 ## 决策变更规则
 
 任何 Accepted 决策变更必须同时提供：

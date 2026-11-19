@@ -113,7 +113,7 @@
 | 消息行 | 30px 头像 + 12px 间距 + 正文；行距 9px；推理记录默认折叠为 5 行灰字，点击标题展开 |
 | 用户消息 | 右对齐气泡，`--well`，`radius 14 14 4 14`，最大 78% |
 | 输入器 | 阅读列底部是一个 `.composer-dock`：左侧 `.composer` 是 `--paper` 卡片（1px 边 + `--shadow-1`，focus 时 `--shadow-2`），右侧 `.composer-agents` 是 30px 头像活动栏。dock 的宽度预算含活动栏：`min(--column-max, calc(100% - 48px))`，即宽度小于 1088px 时改用 24px 外边距、把活动栏的宽度记在面板的边距上，而不是从卡片里扣——否则卡片会被活动栏挤窄（1280×800 下曾从 884 掉到 768），连带把工作目录按钮挤出操作条。**操作条只有一行**：`发送给 @…` 右侧是 `＋ 工作目录 …/repo` 按钮（打开应用内 workspace 选择器，不再跳 `/setup`），右端是 `本条 N / 131072 字符` 与房间上下文估算（空草稿时整块隐藏，两者不是同一个数），状态槽平时为零宽、只承载错误与提交中反馈；提交确认「已接受，等待 Agent 事件」在该回合第一个 `turn.*` 事件或 Agent 消息进入视图时立即清空，若本地 SSE 已抢在 POST 响应之前送达则干脆不显示；收窄时按 meter → 路径文字 → 上下文估算 → 标签的顺序让步，但 `＋ 工作目录` 本身**永不隐藏**（≤700px 只显示 24px 圆形加号，`aria-label` 兜住名称）。**`发送给` 的默认不是 `@all` 的强制项**：点名册项会把它换成那个 Agent，回到全员要显式点 `@all`/`全选` |
-| 忙碌态 | 当前主时间线（非回放）存在任一未终态 Turn 时，发送键的纸飞机换成 13px 旋转环并 `disabled`，`aria-busy="true"`，`title` 为「Agent 仍在工作；本轮结束后才能发送」；每个目标 Agent 头像外圈以 `--tone` 旋转。Turn 到终态后自动解锁；未知 status 按未结束处理（fail-safe）。POST 返回的 turns 先按 `seedOnly` 只写进 `state.turns` 上锁、不建卡片，避免 202 与 SSE 之间出现可再次发送的空窗，同时让卡片仍按 SSE 的 seq 顺序出现在用户消息之后。Enter 触发表单提交时走同一守卫，并在状态槽给出同一文案；本轮结束后该文案自动清空。 |
+| 忙碌态 | 当前主时间线（非回放）存在任一未终态 Turn 时，发送键的纸飞机换成 13px 旋转环、文案变「终止」、`data-mode="stop"`，并且**可点**（`aria-busy="false"`，`aria-label` 写明「终止全部 N 个 Agent 的工作」）；点击 = 对 `state.turns` 里全部非终态、非 `cancel_requested` 的 Turn 各发一条 `POST /api/turns/:id/cancel`，hover 染 `--danger`。扇出期间 `aria-busy="true"` 且暂时禁用；结束后若仍有在飞 Turn 则恢复可点，再点只给「已请求终止，等待 Agent 收尾」而不发第二条命令。每个仍在工作的 Agent 头像外圈以 `--tone` 旋转（reduced-motion 下降速到 2.4s，见 D-049）。Turn 到终态后自动回到「发送」；未知 status 按未结束处理（fail-safe）。POST 返回的 turns 先按 `seedOnly` 只写进 `state.turns` 上锁、不建卡片，避免 202 与 SSE 之间出现可再次发送的空窗。**Enter 只触发提交守卫，绝不终止**；忙碌时按 Enter 在状态槽给出「Agent 仍在工作；本轮结束后才能发送」，本轮结束后该文案自动清空。 |
 | 完成点 | 只有 **live** 终态跃迁（非 replay/bootstrap）给头像加 7px 点：`completed` 用 `--accent`、`failed` 用 `--danger`、`cancelled/interrupted` 用 `--faint`。点图标跳到该 Agent 在本对话的最新可见回复并 1.4s 高亮；异常终态优先跳该 Turn 卡片。点图标、成功发送新消息、换对话或刷新即清；不写 localStorage/DB。 |
 | Agent 活动栏 | 只收 `enabled === true` 且 `status !== "pending_restart"` 的 Agent；**按名册显式顺序排序（`aichatlink.json` 的 `order`，未设则退到 actorId）**，30px 圆，monogram 与顶栏同规则，tone 只染头像底与环。**两排网格，列数 `ceil(N/2)`，行优先**：8 个 Agent 为 4×2，7 个为 4+3，6 个为 3×2，5 个为 3+2；6 个时宽约 106px，输入器不再被单排长条压窄。它不是第二名册：不显示名字、driver、重启/配置，只有工作环与完成点。`max-width: min(240px, 27%)`，列数超出时横向滚动、仍保持两排。 |
 | dock 收窄 | `@container room (max-width: 900px)`：dock 改纵向，输入器占满，活动栏落到卡片下方右对齐（仍两排）；≤760px 由 `.composer-dock` 承担既有 `calc(100% - 24px)` 外边距。`timeline-actions` 的 `--jump-latest-right` 取 dock 右缘，不能取卡片右缘（否则浮标压住活动栏）。 |
@@ -192,7 +192,8 @@
 - 不显示「已载入当前名册」这类无决策的提示条；只有真实的配置错误才占顶部横幅。
 - 不引入新依赖（图标库、CSS 框架、网络字体）。图标用内联 SVG 或单一字形。
 - 活动栏不做第二名册：不放名字、driver、状态文字、重启/配置；只有头像、工作环、完成点。
-- 忙碌锁不是审批层：只锁发送（草稿、取消按钮、目标选择都可用），不得用 `NATIVE_POLICY_BLOCKED` 或 pending request 表达。
+- 忙碌锁不是审批层：忙碌时草稿、目标选择、单 Turn 取消都可用，忙碌键只表达「终止本轮」，不得用
+  `NATIVE_POLICY_BLOCKED` 或 pending request 表达；终止不弹确认框、不自动补发 prompt。
 - 完成点不持久化：不写 localStorage/DB，不跨刷新；它回答「这一轮谁先完成」，不是未读系统。
 - 不在 `prefers-reduced-motion` 下删除「在工作」信号：`tokens.css` 的全局动画重置会豁免
   工作环与发送/终止环（降速到 `--dur-busy` 2400ms），其余过渡与装饰仍按 reduce 关闭（D-049）。
@@ -210,8 +211,10 @@
 4. 键盘：Tab 可到目标芯片、发送、轨内 Agent 卡与重启键、回到最新箭头；轨在 `:focus-within` 下展开。
 5. 静态资源新增文件必须同时登记 `src/web/server/server.ts` 与 `src/web/setup/server.ts` 的白名单
    （`tokens.css` 已登记）。
-6. 忙碌态：任一当前 Turn 未终态时，发送键转圈且禁用；等全部到终态后按草稿是否为空恢复。
-   Enter 提交必须被同一守卫拦下，状态槽不得残留「仍在工作」文案。
+6. 忙碌态：任一当前 Turn 未终态时，发送键转圈并显示「终止」，且**可点**；点击后对全部在飞 Turn
+   各发一条取消命令（命令数 = Turn 数，`clientCommandId` 互不相同），再点一次不新增命令。
+   Enter 提交必须被同一守卫拦下（不产生任何取消命令），状态槽不得残留「仍在工作」文案；
+   全部终态后按钮按草稿是否为空恢复为「发送」或 `blocked`。
 7. 活动栏：只含 enabled 且非 pending_restart 的 Agent；两排网格；工作时环旋转；点击跳最新可见回复并高亮，
    完成点消失。刷新后历史终态不得重新点灯（完成点只来自 live 跃迁）。
    环的旋转必须在 `prefers-reduced-motion: reduce` 下仍然成立（2.4s 一圈，`iteration-count: infinite`）；

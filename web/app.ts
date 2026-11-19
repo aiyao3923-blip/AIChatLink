@@ -11,8 +11,10 @@ import { DISABLED_NOTE, ROOM_VOICE, emptyVoiceFor, type EmptyVoice } from "./emp
 import {
   TERMINAL_TURN_STATUSES,
   activeTurnActorIds,
+  cancellableTurnIds,
   isFinishedTransition
 } from "./agent-activity.js";
+import { sendButtonState } from "./composer-state.js";
 import { parseReasoningRecord } from "./reasoning-record.js";
 import { copyPlainText, flashButtonLabel, renderRichContent } from "./rich-text.js";
 import { describeToolProgress, mergeToolProgressSnapshot } from "./tool-progress.js";
@@ -294,6 +296,7 @@ const composerAgents = byId<HTMLElement>("composer-agents");
 const agentActivityLive = byId<HTMLElement>("agent-activity-live");
 const messageInput = byId<HTMLTextAreaElement>("message-input");
 const sendButton = byId<HTMLButtonElement>("send-button");
+const sendLabel = byId<HTMLSpanElement>("send-label");
 const composerStatus = byId<HTMLSpanElement>("composer-status");
 const characterCount = byId<HTMLSpanElement>("character-count");
 const targetAll = byId<HTMLInputElement>("target-all");
@@ -1985,10 +1988,15 @@ function renderTurnEnvelope(envelope: AIChatLinkEnvelope): void {
   });
 }
 
-async function cancelTurn(turnId: string): Promise<void> {
+/**
+ * Ask the Broker to cancel one Turn. Returns the failure instead of reporting it,
+ * because the bulk stop path has to fold N failures into one status line rather
+ * than stack N global error banners (D-050).
+ */
+async function requestTurnCancel(turnId: string): Promise<{ ok: true } | { ok: false; message: string }> {
   const turn = state.turns.get(turnId);
   if (!turn || TERMINAL_TURN_STATUSES.has(turn.status) || turn.status === "cancel_requested") {
-    return;
+    return { ok: true };
   }
   const retryKey = `cancel:${turnId}`;
   renderTurn({ ...turn, status: "cancel_requested" });
@@ -1998,10 +2006,52 @@ async function cancelTurn(turnId: string): Promise<void> {
       body: JSON.stringify({ clientCommandId: retryableCommandId(retryKey, "web-cancel") }),
     });
     retryCommandIds.delete(retryKey);
+    return { ok: true };
   } catch (error) {
     renderTurn(turn);
-    showGlobalError(errorMessage(error));
+    return { ok: false, message: errorMessage(error) };
   }
+}
+
+async function cancelTurn(turnId: string): Promise<void> {
+  const result = await requestTurnCancel(turnId);
+  if (!result.ok) showGlobalError(result.message);
+}
+
+/**
+ * The busy send button. One click asks every in-flight Turn to stop, which is
+ * the operator's "end this task now" — not a second approval layer and not a
+ * rollback: each Turn still terminates through its own native cancel and the
+ * Broker's own lifecycle. Turns already asked are skipped by
+ * cancellableTurnIds().
+ */
+let stopInFlight = false;
+const STOP_ACK_STATUS = "已请求终止本轮所有 Agent，等待收尾";
+/** Re-clicking a stop whose Turns are all `cancel_requested` says this instead. */
+const STOP_RETRY_STATUS = "已请求终止，等待 Agent 收尾";
+
+async function stopAllAgentWork(): Promise<void> {
+  if (stopInFlight) return;
+  const turnIds = cancellableTurnIds(state.turns.values());
+  if (turnIds.length === 0) {
+    setComposerStatus(isRoomWorking() ? STOP_RETRY_STATUS : "本轮已结束");
+    return;
+  }
+  stopInFlight = true;
+  syncSendButton();
+  setComposerStatus(`正在终止 ${turnIds.length} 个 Agent 的工作…`);
+  const results = await Promise.all(turnIds.map(async (turnId) => await requestTurnCancel(turnId)));
+  stopInFlight = false;
+  const failures = results.filter((result): result is { ok: false; message: string } => !result.ok);
+  if (failures.length === 0) {
+    setComposerStatus(STOP_ACK_STATUS);
+  } else {
+    setComposerStatus(
+      `${failures.length} 个取消失败：${failures[0]?.message ?? "未知错误"}；可再次点击重试`,
+      true
+    );
+  }
+  syncSendButton();
 }
 
 function renderSupervisionEvent(envelope: AIChatLinkEnvelope): void {
@@ -4735,21 +4785,30 @@ function isRoomWorking(): boolean {
 }
 
 function syncSendButton(): void {
-  const submitting = state.submitting;
-  const working = !submitting && isRoomWorking();
-  const busy = submitting || working;
-  sendButton.disabled = busy || messageInput.value.trim().length === 0;
-  sendButton.classList.toggle("is-working", busy);
-  sendButton.setAttribute("aria-busy", String(busy));
-  sendButton.title = submitting
-    ? "正在提交…"
-    : working
-      ? BUSY_SEND_STATUS
-      : "发送给已选 Agent";
-  // The blocked-Enter hint must not outlive the lock that produced it, or the
-  // bar would say "still working" next to an enabled send button.
-  if (!busy && composerStatus.textContent === BUSY_SEND_STATUS) {
-    setComposerStatus("");
+  const workingCount = state.submitting ? 0 : activeTurnActorIds(state.turns.values()).length;
+  const next = sendButtonState({
+    submitting: state.submitting,
+    workingCount,
+    draftLength: messageInput.value.trim().length,
+    stopping: stopInFlight
+  });
+  sendButton.disabled = next.disabled;
+  sendButton.dataset.mode = next.mode;
+  // The spinner belongs to both busy modes: "a Turn is running" for stop,
+  // "the POST is in flight" for blocked.
+  sendButton.classList.toggle("is-working", next.mode !== "send");
+  sendButton.setAttribute("aria-busy", String(next.ariaBusy));
+  sendButton.title = next.title;
+  sendButton.setAttribute("aria-label", next.ariaLabel);
+  if (sendLabel.textContent !== next.label) sendLabel.textContent = next.label;
+  // The blocked-Enter hint and the stop acknowledgement must not outlive the
+  // lock that produced them, or the bar would say "still working" next to an
+  // enabled send button.
+  if (next.mode === "send" || next.mode === "blocked") {
+    const text = composerStatus.textContent;
+    if (text === BUSY_SEND_STATUS || text === STOP_ACK_STATUS || text === STOP_RETRY_STATUS) {
+      setComposerStatus("");
+    }
   }
 }
 
@@ -5564,6 +5623,20 @@ async function bootstrap(): Promise<void> {
 composer.addEventListener("submit", (event) => {
   event.preventDefault();
   void submitMessage();
+});
+
+/**
+ * Clicking the busy button stops the room; pressing Enter does not. Both paths
+ * reach the same `<form>`, so the stop intent is bound to the click alone and
+ * cancelled before the submit event fires — an accidental Enter must never end
+ * eight Agents' work (D-050).
+ */
+sendButton.addEventListener("click", (event) => {
+  if (sendButton.dataset.mode !== "stop") {
+    return;
+  }
+  event.preventDefault();
+  void stopAllAgentWork();
 });
 
 messageInput.addEventListener("input", () => {

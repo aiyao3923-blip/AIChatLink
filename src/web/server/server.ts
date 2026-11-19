@@ -87,6 +87,7 @@ interface StaticAsset {
     | "pagination.js"
     | "pane-lens.js"
     | "pane-view.js"
+    | "composer-state.js"
     | "reasoning-record.js"
     | "rich-text.js"
     | "tool-progress.js"
@@ -109,6 +110,7 @@ const STATIC_ASSETS = new Map<string, StaticAsset>([
   ["/pagination.js", { fileName: "pagination.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pane-lens.js", { fileName: "pane-lens.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pane-view.js", { fileName: "pane-view.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/composer-state.js", { fileName: "composer-state.js", contentType: "application/javascript; charset=utf-8" }],
   ["/reasoning-record.js", { fileName: "reasoning-record.js", contentType: "application/javascript; charset=utf-8" }],
   ["/rich-text.js", { fileName: "rich-text.js", contentType: "application/javascript; charset=utf-8" }],
   ["/tool-progress.js", { fileName: "tool-progress.js", contentType: "application/javascript; charset=utf-8" }],

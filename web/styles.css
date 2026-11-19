@@ -2556,6 +2556,27 @@
   opacity: 1;
 }
 
+/* Busy = stop (D-050). Same shape, same spinner, same width as "send": only the
+   ink changes, because the ring already says "something is running". The one
+   destructive action in the composer is this button, so it borrows --danger on
+   hover and nothing else in the bar does. */
+.send-button[data-mode="stop"] {
+  background: var(--ink);
+  color: var(--canvas);
+  cursor: pointer;
+}
+
+.send-button[data-mode="stop"]:hover:not(:disabled) {
+  background: var(--danger);
+  color: var(--canvas);
+}
+
+.send-button[data-mode="stop"]:disabled {
+  background: var(--paper-2);
+  color: var(--ink-2);
+  opacity: 1;
+}
+
 /* No reduce-motion override for the busy ring/spinner here: they are exempted
    from the global animation reset in tokens.css, next to the reset they outrank. */
 
