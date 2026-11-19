@@ -2679,6 +2679,12 @@ interface ConversationSummary {
   empty: boolean;
   /** Closed conversation this epoch was resumed from; its range is the seed. */
   resumedFrom: ResumedConversationRef | null;
+  /**
+   * The seq ranges this conversation occupies. Continuing a conversation adds a
+   * range, so its own segments may be separated by another conversation's
+   * events; replaying only these keeps the two apart.
+   */
+  ranges: Array<{ fromSeq: number; throughSeq: number }>;
 }
 
 /**
@@ -2973,6 +2979,14 @@ function normalizeConversation(value: unknown): ConversationSummary | null {
   const endSeq = typeof endSeqRaw === "number" ? endSeqRaw : null;
   const active = value.active === true;
   if (!conversationId || !title || !startedAt || typeof startSeq !== "number") return null;
+  const ranges: Array<{ fromSeq: number; throughSeq: number }> = [];
+  for (const entry of asArray(value.ranges)) {
+    if (!isRecord(entry)) continue;
+    const fromSeq = readNumberField(entry, "fromSeq");
+    const throughSeq = readNumberField(entry, "throughSeq");
+    if (fromSeq === null || throughSeq === null || throughSeq < fromSeq) continue;
+    ranges.push({ fromSeq, throughSeq });
+  }
   return {
     conversationId,
     title,
@@ -2981,7 +2995,8 @@ function normalizeConversation(value: unknown): ConversationSummary | null {
     startedAt,
     active,
     empty: value.empty === true,
-    resumedFrom: normalizeResumedConversation(value.resumedFrom)
+    resumedFrom: normalizeResumedConversation(value.resumedFrom),
+    ranges
   };
 }
 
@@ -2997,6 +3012,11 @@ function normalizeResumedConversation(value: unknown): ResumedConversationRef | 
 
 /** Ranges replayed for one conversation: its resume seed first, then its own. */
 function conversationRanges(conversation: ConversationSummary): ConversationView["ranges"] {
+  // The server knows every range this conversation occupies (a continuation is
+  // another range, possibly with another conversation's events in between).
+  if (conversation.ranges.length > 0) {
+    return [...conversation.ranges].sort((left, right) => left.fromSeq - right.fromSeq);
+  }
   const ranges: ConversationView["ranges"] = [];
   if (conversation.resumedFrom) {
     ranges.push({
@@ -3614,6 +3634,13 @@ async function deleteConversation(
   trigger: HTMLButtonElement
 ): Promise<void> {
   const scope = workspaceId === onScreenWorkspaceId() ? "" : "（另一个工作目录）";
+  // The Broker refuses to delete a conversation that still has its own work in
+  // flight, and its public error is the generic contract message. Say the real
+  // reason here instead of letting that banner do the explaining.
+  if (conversation.active && conversationView === null && runningTurnCount() > 0) {
+    showGlobalError("这条对话还有任务在运行：先点「终止」，等它收尾后再删除。");
+    return;
+  }
   const confirmed = window.confirm(
     `删除对话「${conversation.title}」${scope}？\n\n` +
       "该对话的消息、回合与工具记录会从本地数据库永久删除，不能恢复；" +

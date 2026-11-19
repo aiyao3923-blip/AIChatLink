@@ -421,8 +421,15 @@ export class AIChatLinkBroker {
     const resets = this.#store.listContextResets(roomId);
     const ends = resets.map((reset) => reset.throughSeq);
     const starts = [1, ...ends.map((end) => end + 1)];
-    const conversations: ConversationSummary[] = [];
-    const titles = new Map<string, string>();
+    interface Segment {
+      id: string;
+      startSeq: number;
+      endSeq: number | null;
+      resume: (typeof resets)[number]["resume"];
+      first: ReturnType<AIChatLinkStore["firstUserMessage"]>;
+      hasMessages: boolean;
+    }
+    const segments: Segment[] = [];
     for (const [index, startSeq] of starts.entries()) {
       const endSeq = ends[index] ?? null;
       // A second boundary at the same high-water mark (a resume of an epoch
@@ -441,77 +448,148 @@ export class AIChatLinkBroker {
           startSeq - 1,
           endSeq === null ? undefined : endSeq
         );
-      // A closed epoch with no room-context message is a boundary artifact:
-      // two resets in a row, or a reset immediately followed by a resume. There
-      // is no transcript to show, so it does not become a conversation. The
-      // open epoch stays in the list (it carries the live epoch start) but is
-      // flagged `empty`: the sidebar hides it while any other row survives, and
-      // shows it only when it is the group's last row (D-060).
-      if (endSeq !== null && !hasMessages) {
-        continue;
-      }
-      const sourceTitle =
-        resume === undefined ? undefined : titles.get(resume.conversationId);
-      const title =
-        first === undefined
-          ? sourceTitle === undefined
-            ? conversationTitle(undefined, conversations.length + 1)
-            : `${sourceTitle} · 续`
-          : conversationTitle(first.content, conversations.length + 1);
-      const startedAt =
-        first?.occurredAt ??
-        resets[index - 1]?.createdAt ??
-        new Date(0).toISOString();
-      const conversationId = `conv:${startSeq}`;
-      titles.set(conversationId, title);
       // A Turn that was cut by the boundary keeps writing into the next epoch
       // (reasoning, tool records, turn.interrupted). Those events belong to the
       // conversation the Turn started in: without them the old conversation
       // shows a permanently "running" card and the record is unreachable from
       // either side. Extending the replay range is a projection rule only — the
-      // transcript is never rewritten and epoch membership (startSeq of the
-      // next conversation) does not move.
+      // transcript is never rewritten and epoch membership does not move.
       const tailEndSeq =
         endSeq === null
           ? undefined
           : this.#store.latestTurnTerminalSeq({ roomId, fromSeq: startSeq, throughSeq: endSeq });
       const shownEndSeq =
         endSeq === null || tailEndSeq === undefined ? endSeq : Math.max(endSeq, tailEndSeq);
-      // Continuing the newest conversation is not a new conversation: the
-      // operator asked to keep going *in* it. Fold the resumed epoch back into
-      // that row instead of emitting a second one titled "… · 续". Only the
-      // immediately preceding projected conversation can accept the fold: if a
-      // conversation with content was created in between, the seq ranges would
-      // interleave, and a real second segment is the honest answer.
-      const foldInto = resume === undefined ? undefined : conversations.at(-1);
-      if (foldInto !== undefined && foldInto.conversationId === resume?.conversationId) {
-        foldInto.endSeq = shownEndSeq;
-        foldInto.active = shownEndSeq === null;
-        foldInto.empty = false;
-        foldInto.resumedFrom = null;
-        titles.set(foldInto.conversationId, foldInto.title);
-        continue;
-      }
-      conversations.push({
-        conversationId,
-        title,
+      segments.push({
+        id: `conv:${startSeq}`,
         startSeq,
         endSeq: shownEndSeq,
+        resume,
+        first,
+        hasMessages
+      });
+    }
+
+    // A resume points at the conversation it continues, so following that link
+    // gives the conversation's root: every segment that continues the same
+    // conversation (directly, or through an earlier continuation) shares it.
+    // This is what makes "keep talking in this conversation" one conversation
+    // instead of a new "… · 续" row per send.
+    const rootCache = new Map<string, string>();
+    const rootOf = (id: string): string => {
+      const trail: string[] = [];
+      let cursor = id;
+      for (let hop = 0; hop < 64; hop += 1) {
+        const cached = rootCache.get(cursor);
+        if (cached !== undefined) {
+          cursor = cached;
+          break;
+        }
+        const segment = segments.find((candidate) => candidate.id === cursor);
+        if (segment === undefined || segment.resume === undefined) break;
+        trail.push(cursor);
+        cursor = segment.resume.conversationId;
+      }
+      for (const visited of trail) rootCache.set(visited, cursor);
+      rootCache.set(cursor, cursor);
+      return cursor;
+    };
+
+    const titleById = new Map<string, string>();
+    const titleOf = (id: string): string => {
+      const known = titleById.get(id);
+      if (known !== undefined) return known;
+      const segment = segments.find((candidate) => candidate.id === id);
+      const title = conversationTitle(segment?.first?.content, titleById.size + 1);
+      titleById.set(id, title);
+      return title;
+    };
+
+    const conversations: ConversationSummary[] = [];
+    const roots: string[] = [];
+    for (const segment of segments) {
+      // A closed epoch with no room-context message is a boundary artifact:
+      // two resets in a row, or a reset immediately followed by a resume. There
+      // is no transcript to show, so it does not become a conversation. The
+      // open epoch stays in the list (it carries the live epoch start) but is
+      // flagged `empty`, so the sidebar only shows it once it has content.
+      if (segment.endSeq !== null && !segment.hasMessages) continue;
+      const root = rootOf(segment.id);
+      // Every segment that continues the same conversation belongs to one row,
+      // even when another conversation happened in between. The row carries the
+      // ranges it actually occupies, so replaying it shows this conversation and
+      // nothing else — "keep talking in this conversation" stops creating a new
+      // row per send.
+      let existing = -1;
+      for (let index = 0; index < roots.length; index += 1) {
+        if (roots[index] === root) {
+          existing = index;
+          break;
+        }
+      }
+      if (existing !== -1) {
+        const row = conversations[existing]!;
+        row.endSeq = segment.endSeq;
+        row.active = segment.endSeq === null;
+        row.empty = false;
+        row.resumedFrom = null;
+        row.ranges.push({
+          fromSeq: segment.startSeq,
+          throughSeq: segment.endSeq ?? this.#store.getRoomHighWaterSeq(roomId)
+        });
+        continue;
+      }
+      const isRoot = root === segment.id;
+      const rootSegment = segments.find((candidate) => candidate.id === root);
+      const startedAt =
+        rootSegment?.first?.occurredAt ??
+        segment.first?.occurredAt ??
+        resets[starts.indexOf(segment.startSeq) - 1]?.createdAt ??
+        new Date(0).toISOString();
+      const resume = segment.resume;
+      const title =
+        isRoot || segment.first !== undefined
+          ? conversationTitle(
+              (isRoot ? rootSegment?.first : segment.first)?.content,
+              conversations.length + 1
+            )
+          : `${titleOf(resume?.conversationId ?? segment.id)} · 续`;
+      conversations.push({
+        conversationId: segment.id,
+        title,
+        startSeq: segment.startSeq,
+        endSeq: segment.endSeq,
         startedAt,
-        active: shownEndSeq === null,
-        empty: !hasMessages,
+        active: segment.endSeq === null,
+        empty: !segment.hasMessages,
         resumedFrom:
-          resume === undefined
-            ? null
-            : {
+          !isRoot && resume !== undefined
+            ? {
                 conversationId: resume.conversationId,
-                title: titles.get(resume.conversationId) ?? sourceTitle ?? resume.conversationId,
+                title: titleOf(resume.conversationId),
                 fromSeq: resume.fromSeq,
                 throughSeq: resume.throughSeq
               }
+            : null,
+        ranges: [
+          {
+            fromSeq: segment.startSeq,
+            throughSeq: segment.endSeq ?? this.#store.getRoomHighWaterSeq(roomId)
+          }
+        ]
       });
+      roots.push(root);
+      titleById.set(segment.id, title);
     }
-    return conversations.reverse();
+    const ordered = conversations.reverse();
+    // The live conversation belongs at the top of the sidebar even when it was
+    // started earlier: everything else on the list is history.
+    const activeIndex = ordered.findIndex((conversation) => conversation.active);
+    if (activeIndex > 0) {
+      const [active] = ordered.splice(activeIndex, 1);
+      if (active !== undefined) ordered.unshift(active);
+    }
+    return ordered;
   }
 
   async compactContextFromBinding(
@@ -598,6 +676,15 @@ export class AIChatLinkBroker {
       throw new AIChatLinkError("SESSION_NOT_AVAILABLE", "Room context controller is unavailable");
     }
     const roomId = input.roomId ?? this.#defaultRoomId;
+    // A retried resume must replay its receipt even though the conversation it
+    // pointed at is now the open one (and therefore no longer resumable). The
+    // receipt is the only place that still knows the original range.
+    const receipt = this.#store.getClientCommand<
+      import("../memory/types.js").RoomContextResetResult
+    >(input.bindingId, input.clientCommandId);
+    if (receipt?.completed === true && receipt.commandType === "conversation.resume") {
+      return receipt.result as import("../memory/types.js").RoomContextResetResult;
+    }
     const target = this.listConversations(roomId).find(
       (conversation) => conversation.conversationId === input.conversationId
     );
@@ -698,13 +785,17 @@ export class AIChatLinkBroker {
         conversationId: input.conversationId
       });
     }
+    // Only this conversation's own work blocks the delete. The room may be busy
+    // with a different epoch — refusing every delete then made a running turn in
+    // conversation A lock conversation B out of the sidebar for its whole run.
     const inFlight = this.#store
       .listTurns()
-      .filter((turn) => !TERMINAL_TURN_STATUSES.has(turn.status));
+      .filter((turn) => !TERMINAL_TURN_STATUSES.has(turn.status))
+      .filter((turn) => this.#turnBelongsToConversation(turn, target));
     if (inFlight.length > 0) {
       throw new AIChatLinkError(
         "INVALID_ENVELOPE",
-        "A conversation cannot be deleted while turns are queued or running",
+        "This conversation cannot be deleted while its own turns are queued or running",
         { conversationId: input.conversationId, pendingTurns: inFlight.length }
       );
     }
@@ -726,6 +817,19 @@ export class AIChatLinkBroker {
         this.#deleteCommandFlights.delete(commandKey);
       }
     }
+  }
+
+  /**
+   * A Turn belongs to the conversation whose seq range holds its queue event.
+   * D-057 may extend a conversation's `endSeq` past the boundary to the terminal
+   * event, but the queue event always sits inside the range it was sent to.
+   */
+  #turnBelongsToConversation(
+    turn: { enqueueSeq: number },
+    conversation: { startSeq: number; endSeq: number | null }
+  ): boolean {
+    if (turn.enqueueSeq < conversation.startSeq) return false;
+    return conversation.endSeq === null || turn.enqueueSeq <= conversation.endSeq;
   }
 
   async #completeDeleteCommand(

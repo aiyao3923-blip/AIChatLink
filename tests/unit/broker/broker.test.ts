@@ -607,15 +607,16 @@ describe.sequential("AIChatLinkBroker acceptance, dispatch and terminal semantic
       true
     );
 
-    const reopened = fixture.broker.listConversations("room:main")[0]!;
+    // Going back to a conversation continues *that* conversation: same id, same
+    // title, no "· 续" row — its ranges simply gain the continuation.
+    const reopened = fixture.broker
+      .listConversations("room:main")
+      .find((conversation) => conversation.conversationId === closed.conversationId)!;
     expect(reopened.active).toBe(true);
-    expect(reopened.title).toBe(`${closed.title} · 续`);
-    expect(reopened.resumedFrom).toEqual({
-      conversationId: closed.conversationId,
-      title: closed.title,
-      fromSeq: closed.startSeq,
-      throughSeq: closed.endSeq
-    });
+    expect(reopened.title).toBe(closed.title);
+    expect(reopened.resumedFrom).toBeNull();
+    expect(reopened.ranges).toHaveLength(2);
+    expect(reopened.ranges[0]).toEqual({ fromSeq: closed.startSeq, throughSeq: closed.endSeq });
     expect(fixture.published.at(-1)).toMatchObject({
       type: "context.reset",
       body: {
@@ -993,6 +994,71 @@ describe.sequential("AIChatLinkBroker acceptance, dispatch and terminal semantic
     release.resolve();
     await fixture.broker.waitForIdle();
     expect(fixture.store.getEvent(accepted.messageEventId)).toBeDefined();
+  });
+
+  it("deletes a closed conversation while another conversation is running", async () => {
+    const usage = conversationUsage();
+    const release = deferred();
+    let store: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => {
+          const throughSeq = store!.getRoomHighWaterSeq(roomId);
+          store!.recordContextReset({ roomId, throughSeq });
+          return { reset: true, throughSeq, resetNativeSessions: false, usage };
+        },
+        resumeNow: () => ({
+          reset: true,
+          throughSeq: usage.throughSeq,
+          resetNativeSessions: false,
+          usage
+        })
+      }
+    });
+    store = fixture.store;
+
+    await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "scope-first", to: ["agent:codex"], content: "close me" }
+    });
+    await fixture.broker.waitForIdle();
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "scope-reset",
+      roomId: "room:main"
+    });
+
+    // The open conversation keeps a Turn running; the closed one must still go.
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await release.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "late answer" });
+    };
+    const running = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "scope-running", to: ["agent:codex"], content: "still running" }
+    });
+    await waitUntil(() => store!.getTurn(running.turns[0]!.turnId)?.status === "running");
+
+    const closed = fixture.broker
+      .listConversations("room:main")
+      .find((conversation) => !conversation.active)!;
+    const result = await fixture.broker.deleteConversationFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "scope-delete",
+      conversationId: closed.conversationId,
+      roomId: "room:main"
+    });
+    expect(result.conversationId).toBe(closed.conversationId);
+    expect(result.deletedTurns).toBe(1);
+    expect(
+      fixture.broker.listConversations("room:main").filter((conversation) => !conversation.active)
+    ).toHaveLength(0);
+
+    release.resolve();
+    await fixture.broker.waitForIdle();
   });
 
   it("rejects resuming an unknown or still-open conversation", async () => {
@@ -2902,7 +2968,7 @@ describe.sequential("AIChatLinkBroker conversation continuity", () => {
     });
   });
 
-  it("keeps a real second segment when another conversation happened in between", async () => {
+  it("merges a conversation across another conversation without leaking its events", async () => {
     const usage = conversationUsage();
     let fixtureStore: SqliteAIChatLinkStore | undefined;
     const record = (
@@ -2942,7 +3008,7 @@ describe.sequential("AIChatLinkBroker conversation continuity", () => {
       clientCommandId: "seg-reset",
       roomId: "room:main"
     });
-    seed("seg-second", "第二段");
+    seed("seg-second", "另一段对话");
 
     await fixture.broker.resumeConversationFromBinding({
       bindingId: "binding:web",
@@ -2950,19 +3016,27 @@ describe.sequential("AIChatLinkBroker conversation continuity", () => {
       conversationId: "conv:1",
       roomId: "room:main"
     });
+    seed("seg-third", "回到第一段继续");
 
     const conversations = fixture.broker.listConversations("room:main");
-    const resumed = conversations.find((entry) => entry.resumedFrom !== null)!;
-    expect(resumed).toMatchObject({
-      resumedFrom: { conversationId: "conv:1" },
-      active: true
+    // The conversation the operator went back to is one row again, and it is the
+    // live one — sending here no longer creates a "· 续" row per message.
+    expect(conversations).toHaveLength(2);
+    const merged = conversations[0]!;
+    expect(merged).toMatchObject({
+      conversationId: "conv:1",
+      active: true,
+      endSeq: null,
+      resumedFrom: null
     });
-    expect(resumed.title).toContain("· 续");
-    // The conversation in between keeps its own row: the ranges do not
-    // interleave, so a real second segment is the honest projection.
-    expect(conversations).toHaveLength(3);
-    expect(conversations[0]).toBe(resumed);
-    expect(conversations.at(-1)?.conversationId).toBe("conv:1");
-    expect(conversations[1]?.conversationId).not.toBe("conv:1");
+    // Its replay ranges skip the conversation created in between, so the two
+    // never leak into each other.
+    expect(merged.ranges).toHaveLength(2);
+    const [first, second] = merged.ranges;
+    expect(first!.fromSeq).toBe(1);
+    expect(second!.fromSeq).toBeGreaterThan(first!.throughSeq + 1);
+    const foreign = conversations[1]!;
+    expect(foreign.conversationId).not.toBe("conv:1");
+    expect(foreign.active).toBe(false);
   });
 });
