@@ -843,11 +843,23 @@ function answersDeliveryAcknowledgement(envelope: AIChatLinkEnvelope): boolean {
   return envelope.type === "message.created" && envelope.actor.kind !== "user";
 }
 
+/**
+ * One "design pixel" in device-independent CSS px. The stylesheet scales the
+ * whole shell from the root font size (see tokens.css `--px`), so any geometry
+ * the browser computes in JavaScript has to use the same multiplier or it would
+ * keep the input at laptop height on a 27" screen.
+ */
+function designPx(value: number): number {
+  const root = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return Math.round(value * ((Number.isFinite(root) ? root : 16) / 16));
+}
+
 function autoresizeComposer(): void {
+  const cap = designPx(180);
   messageInput.style.height = "auto";
-  const next = Math.min(messageInput.scrollHeight, 180);
+  const next = Math.min(messageInput.scrollHeight, cap);
   messageInput.style.height = `${next}px`;
-  messageInput.style.overflowY = messageInput.scrollHeight > 180 ? "auto" : "hidden";
+  messageInput.style.overflowY = messageInput.scrollHeight > cap ? "auto" : "hidden";
 }
 
 function saveDraft(): void {
@@ -1242,11 +1254,11 @@ function syncJumpLatestGeometry(): void {
   if (box.height <= 0) return;
   conversationPanel.style.setProperty(
     "--jump-latest-bottom",
-    `${Math.max(12, Math.round(panel.bottom - box.top + 12))}px`
+    `${Math.max(designPx(12), Math.round(panel.bottom - box.top + designPx(12)))}px`
   );
   conversationPanel.style.setProperty(
     "--jump-latest-right",
-    `${Math.max(12, Math.round(panel.right - box.right + 12))}px`
+    `${Math.max(designPx(12), Math.round(panel.right - box.right + designPx(12)))}px`
   );
 }
 
@@ -4555,8 +4567,10 @@ function renderComposerAgents(): void {
     composerRailSignature = signature;
     composerAgents.replaceChildren();
     // Two rows, readable order: row 1 is agents 1..k, row 2 is k+1..N.
-    composerAgents.style.gridTemplateColumns =
-      agents.length === 0 ? "" : `repeat(${Math.ceil(agents.length / 2)}, 30px)`;
+    composerAgents.style.setProperty(
+      "--rail-cols",
+      String(agents.length === 0 ? 0 : Math.ceil(agents.length / 2))
+    );
     for (const agent of agents) {
       const button = document.createElement("button");
       button.type = "button";
@@ -5725,10 +5739,11 @@ function setAssistantFormStatus(message: string, error = false): void {
 }
 
 function autoresizeAssistant(): void {
+  const cap = designPx(140);
   assistantInput.style.height = "auto";
-  const next = Math.min(assistantInput.scrollHeight, 140);
+  const next = Math.min(assistantInput.scrollHeight, cap);
   assistantInput.style.height = `${next}px`;
-  assistantInput.style.overflowY = assistantInput.scrollHeight > 140 ? "auto" : "hidden";
+  assistantInput.style.overflowY = assistantInput.scrollHeight > cap ? "auto" : "hidden";
 }
 
 function syncAssistantSendButton(): void {
