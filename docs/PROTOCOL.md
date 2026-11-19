@@ -519,7 +519,7 @@ v0.1 固定 unrestricted，AIChatLink 没有 approval、permission 或 user-inpu
 
 ### 10.1 Bootstrap
 
-`GET /api/bootstrap` 在同一 SQLite read snapshot 中返回房间投影和该投影已包含的最大 durable `cursor`。查询只读取有界的最近事件以及当前房间的非终态 Turn，不扫描完整历史；公开 Turn 仅含 `turnId/targetActorId/status/sourceEventId`，不回显 binding、adapter、native ID 或调度字段。客户端随后以该 cursor 打开 `/api/events`；在 bootstrap commit snapshot 与 SSE 连接之间提交的事件会由同一 SQLite tail 以 `seq > cursor` 读取，不依赖一次性 live 广播。
+`GET /api/bootstrap` 在同一 SQLite read snapshot 中返回房间投影和该投影已包含的最大 durable `cursor`。查询只读取有界的最近事件以及当前房间的非终态 Turn，不扫描完整历史；公开 Turn 含 `turnId/targetActorId/status/sourceEventId`，另有可选的 `partialText`（最多 2000 字符的**尾部**）与 `partialTextTruncated`，只用于让重载/切换视图后的页面显示「已经产出了什么」，不以 token delta 形式持久化；不回显 binding、adapter、native ID 或调度字段。客户端随后以该 cursor 打开 `/api/events`；在 bootstrap commit snapshot 与 SSE 连接之间提交的事件会由同一 SQLite tail 以 `seq > cursor` 读取，不依赖一次性 live 广播。
 
 ### 10.2 创建用户消息
 

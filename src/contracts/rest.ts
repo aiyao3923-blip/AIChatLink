@@ -475,7 +475,14 @@ export const TurnProjectionSchema = z
     turnId: ReferenceIdSchema,
     targetActorId: AgentActorIdSchema,
     status: z.string().min(1).max(64),
-    sourceEventId: ReferenceIdSchema
+    sourceEventId: ReferenceIdSchema,
+    /**
+     * Bounded tail of the text this Turn has already produced. It is what a
+     * reloaded page can honestly show instead of an empty "running" card;
+     * only Active Turns carry it, and the live delta stream supersedes it.
+     */
+    partialText: z.string().max(2_000).optional(),
+    partialTextTruncated: z.boolean().optional()
   })
   .strict();
 

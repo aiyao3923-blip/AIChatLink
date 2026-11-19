@@ -2681,3 +2681,66 @@ describe.sequential("AIChatLinkBroker session-swap coordination", () => {
     expect(fixture.adapters.codex.prompts).toHaveLength(1);
   });
 });
+
+describe.sequential("AIChatLinkBroker bootstrap Turn projection", () => {
+  it("carries the text an unfinished Turn already produced", async () => {
+    const release = deferred();
+    const fixture = createFixture();
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      yield nativeEvent("codex", "content.delta", { text: "先写这么多" }, `${input.turnId}:delta`);
+      await release.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "全文" }, `${input.turnId}:done`);
+    };
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "partial-small", to: ["agent:codex"], content: "go" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await waitUntil(() => fixture.store.getTurn(turnId)?.partialText === "先写这么多");
+
+    const projected = fixture.broker
+      .bootstrap()
+      .activeTurns.find((turn) => turn.turnId === turnId)!;
+    expect(projected).toMatchObject({
+      turnId,
+      status: "running",
+      partialText: "先写这么多"
+    });
+    expect(projected.partialTextTruncated).toBeUndefined();
+
+    release.resolve();
+    await fixture.broker.waitForIdle();
+    expect(fixture.store.getTurn(turnId)?.status).toBe("completed");
+    // A finished Turn is no longer an active projection.
+    expect(fixture.broker.bootstrap().activeTurns).toHaveLength(0);
+  });
+
+  it("bounds the projection to a tail and says it was cut", async () => {
+    const release = deferred();
+    const fixture = createFixture();
+    const long = `${"甲".repeat(2_400)}END`;
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      yield nativeEvent("codex", "content.delta", { text: long }, `${input.turnId}:delta`);
+      await release.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "done" }, `${input.turnId}:done`);
+    };
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "partial-long", to: ["agent:codex"], content: "go" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await waitUntil(() => (fixture.store.getTurn(turnId)?.partialText ?? "").length > 2_000);
+
+    const projected = fixture.broker
+      .bootstrap()
+      .activeTurns.find((turn) => turn.turnId === turnId)!;
+    expect(projected.partialText).toHaveLength(2_000);
+    expect(projected.partialText?.endsWith("END")).toBe(true);
+    expect(projected.partialTextTruncated).toBe(true);
+
+    release.resolve();
+    await fixture.broker.waitForIdle();
+  });
+});

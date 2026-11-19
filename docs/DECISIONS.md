@@ -1326,3 +1326,36 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 
 完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 808 项）通过；
 `tests/unit/web/draft-scope.test.ts` 覆盖同房间不同对话、跨房间、空草稿删 key、存储抛错四种情形。
+
+## D-056：bootstrap 的未完成 Turn 带上已产出文本，切换视图才看得见「进度」
+
+触发证据：用户「两个房间来回切着看进度」。核对实现：运行中每 `partialCheckpointChars`（4096）
+会写一次 `turns.partial_text`（`broker.#handleNativeEvent`），但 `bootstrap()` 的 `activeTurns`
+投影只取 `turnId/targetActorId/status/sourceEventId`，`TurnView` 也没有这个字段；而流式
+`turn.content.delta` 是 transient、不持久化。于是切走再切回只剩一个写着「运行中」的空卡片，
+已经输出的文字全部消失——看到的不是进度，只是「还活着」。
+
+决定：
+
+1. `bootstrap.activeTurns` 增加可选 `partialText`（**尾部**，上限 2000 字符）与
+   `partialTextTruncated`。取尾部而不是头部，是为了接上「现在写到哪」，与切回后继续追加的语义一致。
+2. 只是把**已存在的 checkpoint** 暴露出来，不新增持久化路径：仍然不落逐 token delta，
+   `partial_text` 的写入时机与上限不变。
+3. 前端在**非终态**卡片里渲染 `.turn-partial`（带 `已产出 / 已产出（前段省略）· 仍在运行` 标签）；
+   一旦该 Turn 的 live 流开始（`ensureStreamingNode` + `clearTurnPartial`），checkpoint 立即让位，
+   避免与流式气泡重复。
+4. `trackTurnEnvelope` 保留 `partialText`：后续 lifecycle 帧（dispatched/streaming）不得把它擦掉。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 把 delta 持久化，切回直接重放 | 违反「不持久化逐 token delta」；存储与回放成本比收益大得多 |
+| 只在客户端缓存 delta（内存） | 切房间是整页 reload，内存缓存必丢，解决不了用户的场景 |
+| 返回完整 `partialText` | 检查点是全量累计，可能很长；bootstrap 必须保持有界 |
+| 在卡片里显示「运行中 + 已用时长」 | 时长不回答「它写了什么」，而这正是用户切换回来要看的东西 |
+
+原因：用户切回来要看的是**进度内容**，不是存活信号。DB 里已经有这份 checkpoint，
+不暴露它等于让唯一的权威写入者替用户藏了最有用的信息。
+
+完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 810 项）通过；
+`tests/unit/broker/broker.test.ts` 新增 2 项（小文本原样投影、超限时取尾部并标记截断，
+且终态后不再出现在 activeTurns）；契约 `TurnProjectionSchema` 覆盖新字段。

@@ -1533,6 +1533,28 @@
   color: var(--danger);
 }
 
+/* Checkpointed text of an unfinished Turn after a reload or a view switch. It
+   is a read-only projection: the live delta stream replaces it on arrival. */
+.turn-partial {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-left: 2px solid var(--accent-line);
+  background: var(--well);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+
+.turn-partial-note {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: var(--fs-11);
+  letter-spacing: 0.02em;
+}
+
+.turn-partial .event-content {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
 .cancel-button {
   margin-top: 4px;
   padding: 2px 8px;

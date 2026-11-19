@@ -85,6 +85,9 @@ interface TurnView {
   status: string;
   correlationId: string;
   error: string;
+  /** Bounded text an unfinished Turn has already produced (bootstrap only). */
+  partialText?: string;
+  partialTextTruncated?: boolean;
 }
 
 /** A live Turn that just reached a terminal status, kept until the operator looks. */
@@ -630,12 +633,17 @@ function normalizeTurn(value: unknown): TurnView | null {
   if (!turnId) {
     return null;
   }
+  const partialText = readStringField(value, "partialText");
   return {
     turnId,
     targetActorId: readStringField(value, "targetActorId", "target"),
     status: readStringField(value, "status") || "queued",
     correlationId: readStringField(value, "correlationId", "rootCorrelationId"),
     error: readStringField(value, "error", "errorCode", "message"),
+    ...(partialText.length === 0 ? {} : { partialText }),
+    ...(readBooleanField(value, false, "partialTextTruncated")
+      ? { partialTextTruncated: true }
+      : {})
   };
 }
 
@@ -1578,6 +1586,11 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
   }
 }
 
+/** A live delta supersedes the bootstrap checkpoint of the same Turn. */
+function clearTurnPartial(turnId: string): void {
+  turnNodes.get(turnId)?.querySelector(".turn-partial")?.remove();
+}
+
 function ensureStreamingNode(
   envelope: AIChatLinkEnvelope,
   key: string,
@@ -1610,6 +1623,9 @@ function ensureStreamingNode(
     article.append(createActorAvatar(envelope.actor), body);
     item.append(article);
     streamNodes.set(key, article);
+    // The live stream is now the authoritative view of this Turn's text.
+    const streamedTurnId = turnIdFromBody(envelope.body);
+    if (streamedTurnId !== "") clearTurnPartial(streamedTurnId);
     maybeInsertDateDivider(envelope.occurredAt);
     appendTimeline(item);
   }
@@ -1885,7 +1901,17 @@ function trackTurnEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
     envelope.to[0] ||
     envelope.actor.actorId;
   const error = readStringField(body, "error", "errorCode", "message");
-  state.turns.set(turnId, { turnId, targetActorId, status, correlationId: envelope.correlationId, error });
+  state.turns.set(turnId, {
+    turnId,
+    targetActorId,
+    status,
+    correlationId: envelope.correlationId,
+    error,
+    // A later lifecycle frame (dispatched/streaming) must not erase the
+    // checkpoint a reloaded page is using to show what this Turn already wrote.
+    ...(previous?.partialText === undefined ? {} : { partialText: previous.partialText }),
+    ...(previous?.partialTextTruncated === true ? { partialTextTruncated: true } : {})
+  });
   if (
     live &&
     previous !== undefined &&
@@ -1962,6 +1988,27 @@ function renderTurn(turn: TurnView, options: RenderTurnOptions = {}): void {
     error.className = "turn-error";
     error.textContent = turn.error;
     article.append(error);
+  }
+  // A reloaded page gets the checkpointed text instead of an empty "running"
+  // card. The live delta stream supersedes it once it arrives (see
+  // clearTurnPartial), so this never doubles the answer.
+  if (
+    turn.partialText !== undefined &&
+    !TERMINAL_TURN_STATUSES.has(turn.status) &&
+    !streamNodes.has(`turn:${turn.turnId}`)
+  ) {
+    const partial = document.createElement("div");
+    partial.className = "turn-partial";
+    const note = document.createElement("p");
+    note.className = "turn-partial-note";
+    note.textContent = turn.partialTextTruncated
+      ? "已产出（前段省略）· 仍在运行"
+      : "已产出 · 仍在运行";
+    const body = document.createElement("div");
+    body.className = "event-content";
+    renderRichContent(body, turn.partialText);
+    partial.append(note, body);
+    article.append(partial);
   }
   if (item) {
     appendTimeline(item);

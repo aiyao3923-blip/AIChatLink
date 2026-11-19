@@ -199,7 +199,7 @@ binding 是 provenance/correlation handle，不是 secret、token 或本机抗�
 | I-007 | 慢客户端 | 可丢/并 transient delta，不丢 durable terminal；断开后 cursor 重连 |
 | I-008 | durable publish | 按全局 seq 顺序，不按 callback 到达顺序 |
 | I-009 | `afterSeq` 与 `Last-Event-ID` 同时存在 | 值相同才接受；不同返回 `INVALID_ENVELOPE` |
-| I-010 | bootstrap 期间并发 durable event / 多房间 active Turn | 投影与 cursor 来自同一 DB snapshot；只返回当前房间的有界最近事件与最小公开 Turn 字段；随后 SSE 从 `seq > cursor` 无缺口追上 |
+| I-010 | bootstrap 期间并发 durable event / 多房间 active Turn | 投影与 cursor 来自同一 DB snapshot；只返回当前房间的有界最近事件与最小公开 Turn 字段（含 2000 字符以内的 `partialText` 尾部）；随后 SSE 从 `seq > cursor` 无缺口追上 |
 | I-011 | native reasoning delta 后刷新/重连 | delta 不逐条落库；terminal transaction 生成最多一条 `turn.reasoning.recorded`，按 seq 在 response/terminal 前回放 |
 | I-012 | native tool started/completed 后刷新/重连 | live `tool.progress` 保持 transient；terminal transaction 生成 `tool.progress.recorded`，同一 `turnId + toolCallId` 仍合并为气泡内折叠记录 |
 | I-013 | publish acceptance | `client_commands + message.created + result` 同事务；幂等 replay 不重复 event，零 Turn |

@@ -330,6 +330,9 @@ export interface BrokerTurnProjection {
   targetActorId: string;
   status: TurnRecord["status"];
   sourceEventId: string;
+  /** Bounded tail of the text this Turn has already produced (unfinished only). */
+  partialText?: string;
+  partialTextTruncated?: boolean;
 }
 
 export interface BrokerBootstrap {

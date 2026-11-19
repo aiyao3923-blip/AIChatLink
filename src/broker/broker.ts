@@ -111,6 +111,12 @@ const SESSION_SWAP_POLL_MS = 20;
 const GHOST_TURN_GRACE_MS = 5_000;
 
 const DEFAULT_PARTIAL_CHECKPOINT_CHARS = 4_096;
+/**
+ * How much already-produced text a bootstrap Turn projection carries. A
+ * reloaded page must be able to show "it has written this much", but the
+ * bootstrap is bounded: this is a tail, and the flag says it was cut.
+ */
+const BOOTSTRAP_PARTIAL_CHARS = 2_000;
 const DEFAULT_NATIVE_CANCEL_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_EVENT_PAGE = 500;
@@ -1411,12 +1417,23 @@ export class AIChatLinkBroker {
         };
       }),
       recentEvents: snapshot.recentEvents.map(toEnvelope),
-      activeTurns: snapshot.activeTurns.map((turn) => ({
-        turnId: turn.turnId,
-        targetActorId: turn.targetActorId,
-        status: turn.status,
-        sourceEventId: turn.sourceEventId
-      }))
+      activeTurns: snapshot.activeTurns.map((turn) => {
+        const partial = turn.partialText ?? "";
+        const tail =
+          partial.length > BOOTSTRAP_PARTIAL_CHARS
+            ? partial.slice(-BOOTSTRAP_PARTIAL_CHARS)
+            : partial;
+        return {
+          turnId: turn.turnId,
+          targetActorId: turn.targetActorId,
+          status: turn.status,
+          sourceEventId: turn.sourceEventId,
+          ...(tail.length === 0 ? {} : { partialText: tail }),
+          ...(partial.length > BOOTSTRAP_PARTIAL_CHARS
+            ? { partialTextTruncated: true }
+            : {})
+        };
+      })
     };
   }
 
