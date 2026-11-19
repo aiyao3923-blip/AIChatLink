@@ -1636,3 +1636,51 @@ session 表 + 多区间种子路线（本项目仍未做）。
 单窗格、单 Agent 车道、3 格、8 格四种布局下每格目录按钮可见且不越出本格；目录只列本格用户
 消息、点条目在本格居中高亮；某格离底 >120px 时该格箭头出现、点击贴底，别格不受影响；
 单窗格几何与改前一致（按钮贴 composer 右缘、离格底 12px）。
+
+## D-063：发送即显示 —— 操作者自己的消息先画本地回声
+
+触发证据：用户贴图（`PixPin_2026-11-19_21-07-35.png`）质问「响应速度有点慢啊？我『继续』都发出去 5s 了，
+对话记录里面还是没有显示」。查运行库（`ws_5bfb37400d97` 的 `events` 表）可复现两段：
+
+| 事件 | 时间戳（UTC） |
+| --- | --- |
+| `context.reset`（resume，seq 641） | `13:07:19.543` |
+| `message.created`（seq 642） | `13:07:30.377` |
+| `context.reset`（resume，seq 577） | `12:59:39.882` |
+| `message.created`（seq 578） | `12:59:50.849` |
+
+两次 resume 都留下 **≈10.9s** 的空窗（用户看到的是前 5s 里什么都没有）。原因不是渲染慢
+（该库只有 85 个事件、正文合计约 55KB），而是 `submitMessage()` 讲到「以这段对话为上下文继续」时
+**先 await `POST /api/conversations/resume`**，Broker 要等全部 8 个 Adapter 换完 native session
+才写回执，而操作者自己的气泡**只来自 SSE 的 `message.created`** —— 于是整个换会话期间时间线一片空白。
+
+决定：
+
+1. **点击发送立刻画自己的消息**：`submitMessage()` 在第一个 await 之前调 `showPendingEcho()`，
+   给每个窗格各画一张 `actor-user-card`（车道里是同样的 `lane-prompt` 折叠行，所以真卡片替换它时
+   文字不会跳位）。位置用 `[data-pending="true"]` + 11px 的「发送中…」标出，深浅只是辅助信号。
+2. **回声是 chrome，不是状态**：它**不**进 `state.messages` / `eventNodes` / `paneLog` / 对话目录，
+   所以 replay、bootstrap、目录序号都不可能把它当成已存事件；它也从不断言「已保存」。
+3. **退役规则放在可测模块里**：`web/pending-echo.ts` 的 `echoRetiredBy()`——202 报出 `messageEventId`
+   之前按正文相等退役（SSE 常抢先），报出之后只认 eventId（正文相同也可能是别的客户端发的）。
+4. **失败即撤**：POST 失败时移除回声（正文留在输入框里可重发），绝不留下一条「发送过但其实没有」的气泡。
+5. **续聊边界重排**：从历史对话发消息时，回声先于 `继续自「…」` 那条边界线落地，`appendConversationBoundary()`
+   把回声挪到边界线下面，与真事件到达后的位置一致。
+6. **重建即退役**：`clearTimelineView()`（换对话、`+ 对话`、整页重建）清掉回声——重建后的权威版本来自
+   replay 窗口里的真事件，不由这个本地占位续命。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 只把 resume 的 restart 变快 | 换会话仍需 1–2s，空窗只是变短，不消失；两者互补而不是二选一 |
+| 先 POST 消息、把 resume 抛到后台 | 消息会落到还没换掉的旧原生会话（或旧纪元）上，违反「续聊先换会话」合同 |
+| 把回声当成真事件塞进 `state.messages` | 未落库的东西会污染目录、reply 预览和 replay 去重，等于把乐观 UI 加进状态层 |
+| 用「正在提交…」状态槽表达 | 状态槽只在输入器里、11px 单行；操作者看的是对话列，不是输入器 |
+| 用 spinner 占位卡片 | 与 D-055 的「环只表示有任务在跑」冲突：这时还没有任何 Turn |
+
+原因：D-044/D-055 禁止的是**替 Broker 断言状态**（乐观终态、乐观解锁忙锁），而这里的回声
+表示的是「我刚按了发送」这件操作者自己做过的事，且带「发送中」标签、失败即撤。它不构成任何
+durability 声明，所以不违反那两条。
+
+完成标准：`npm run typecheck` 通过；`npm test`（77 文件 / 823 项）通过；
+`npm run build` 产出 `dist/web/pending-echo.js` 且服务端 `STATIC_ASSETS` 已登记（`static-assets.test.ts` 通过）。
+实时观感未在运行实例上观测——该实例是全局安装包（`@aiyao/aichatlink`），需重新安装/重启后生效。

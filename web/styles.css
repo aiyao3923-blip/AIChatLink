@@ -1428,6 +1428,19 @@
   flex-direction: row-reverse;
 }
 
+/* The send echo: the operator's own message, painted before the Broker confirms
+   it. Dimmed until the durable card replaces it; the hint says so in words, the
+   dimming is not the only signal (D-063). */
+.event-card[data-pending="true"] {
+  opacity: 0.72;
+}
+
+.event-pending-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: var(--fs-11);
+}
+
 /* reply quotes */
 
 .reply-reference {

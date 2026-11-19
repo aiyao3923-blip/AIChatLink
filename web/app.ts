@@ -38,6 +38,7 @@ import {
   type PaneLens
 } from "./pane-lens.js";
 import { createPaneShell, fillPaneLensOptions, type PaneShell } from "./pane-view.js";
+import { echoRetiredBy, type PendingEchoClaim } from "./pending-echo.js";
 
 type JsonRecord = Record<string, unknown>;
 type ConnectionState = "bootstrapping" | "connecting" | "live" | "reconnecting" | "offline";
@@ -1461,6 +1462,165 @@ function isSupervisionWatchBody(body: unknown): boolean {
   return isRecord(body) && body.kind === "supervision.watch";
 }
 
+/**
+ * The body of a message card: rich text, then the lane collapse a narrow pane
+ * needs. Shared by the durable card and the send echo so that replacing one
+ * with the other cannot move the text under the reader's cursor.
+ */
+function appendMessageBody(
+  body: HTMLElement,
+  input: {
+    content: string;
+    occurredAt: string;
+    actions?: HTMLElement;
+    /** Trailing metadata (the echo's 发送中 hint); never part of a stored card. */
+    trailing?: HTMLElement;
+    lanePrompt: boolean;
+  }
+): void {
+  // blocks (lists, tables, code) live here, so this must not be a paragraph
+  const content = document.createElement("div");
+  content.className = "event-content";
+  renderRichContent(content, input.content);
+  body.append(content);
+
+  if (!input.lanePrompt) {
+    if (input.trailing !== undefined) body.querySelector(".event-meta")?.append(input.trailing);
+    if (input.actions !== undefined) body.append(input.actions);
+    return;
+  }
+
+  // A lane shows the operator's prompt as one collapsible line: six full copies
+  // of a long brief would push every Agent's answer below the fold. Room keeps
+  // the original bubble.
+  const meta = body.querySelector(".event-meta");
+  meta?.remove();
+  const details = document.createElement("details");
+  details.className = "lane-prompt";
+  const summary = document.createElement("summary");
+  const kicker = document.createElement("span");
+  kicker.className = "lane-prompt-kicker";
+  kicker.textContent = "你";
+  const time = document.createElement("span");
+  time.className = "lane-prompt-time";
+  time.textContent = formatTime(input.occurredAt);
+  const excerpt = document.createElement("span");
+  excerpt.className = "lane-prompt-excerpt";
+  const flat = input.content.replace(/\s+/gu, " ").trim();
+  excerpt.textContent = flat.length > 60 ? `${flat.slice(0, 60)}…` : flat || "（空消息）";
+  summary.append(kicker, time, excerpt);
+  if (input.trailing !== undefined) summary.append(input.trailing);
+  const wrapper = document.createElement("div");
+  wrapper.className = "lane-prompt-body";
+  wrapper.append(...Array.from(body.children));
+  if (input.actions !== undefined) wrapper.append(input.actions);
+  details.append(summary, wrapper);
+  body.append(details);
+}
+
+/**
+ * The operator's own message, painted before the Broker confirms it. Not a
+ * durable record and never treated as one: it is deliberately absent from
+ * `state.messages`, `eventNodes`, `paneLog`, and the message index, so no replay,
+ * bootstrap, or index can mistake it for a stored event (D-063).
+ */
+interface PendingEcho {
+  claim: PendingEchoClaim;
+  /** Every pane paints the operator's prompts, so the echo is one node per pane. */
+  nodes: Map<string, HTMLLIElement>;
+}
+
+let pendingEcho: PendingEcho | null = null;
+
+function buildPendingEchoItem(content: string, occurredAt: string): HTMLLIElement {
+  const item = document.createElement("li");
+  item.className = "timeline-item";
+  const article = document.createElement("article");
+  article.className = `event-card ${cardToneClass("user:web")} actor-user-card`;
+  article.dataset.pending = "true";
+
+  const body = document.createElement("div");
+  body.className = "event-body";
+  const meta = document.createElement("div");
+  meta.className = "event-meta";
+  const name = document.createElement("span");
+  name.className = "actor-name";
+  name.textContent = "你";
+  const time = document.createElement("time");
+  time.className = "event-time";
+  time.dateTime = occurredAt;
+  time.textContent = formatTime(occurredAt);
+  const status = document.createElement("span");
+  status.className = "event-pending-status";
+  status.textContent = "发送中…";
+  meta.append(name, time);
+  body.append(meta);
+
+  appendMessageBody(body, {
+    content,
+    occurredAt,
+    trailing: status,
+    lanePrompt: activePane !== null && activePane.lens.kind === "agent"
+  });
+  article.append(body);
+  item.append(article);
+  return item;
+}
+
+/** Paint the operator's message now; the durable frame retires it later. */
+function showPendingEcho(content: string): void {
+  clearPendingEcho();
+  const occurredAt = new Date().toISOString();
+  const nodes = new Map<string, HTMLLIElement>();
+  for (const pane of panes) {
+    usePaneContext(pane);
+    // Sending is the one append the reader asked for, so it overrides a
+    // scrolled-up position instead of adding to the "new messages" badge.
+    roomFollow.resume();
+    const item = buildPendingEchoItem(content, occurredAt);
+    appendTimeline(item);
+    nodes.set(pane.id, item);
+  }
+  if (panes.length > 0) {
+    usePaneContext(panes[0]!);
+  }
+  pendingEcho = { claim: { content, eventId: null }, nodes };
+}
+
+function clearPendingEcho(): void {
+  const echo = pendingEcho;
+  if (echo === null) return;
+  pendingEcho = null;
+  for (const item of echo.nodes.values()) {
+    cleanupRemovedItem(item);
+    item.remove();
+  }
+}
+
+/** The 202 named the stored event: from here only that id can retire the echo. */
+function recordPendingEchoEventId(accepted: unknown): void {
+  if (pendingEcho === null || !isRecord(accepted)) return;
+  const eventId = readStringField(accepted, "messageEventId");
+  if (eventId !== "") pendingEcho.claim.eventId = eventId;
+}
+
+/**
+ * A durable operator message replaces the echo. Its node is removed *before* the
+ * real card is painted, so the message never appears twice and never jumps.
+ */
+function retirePendingEcho(envelope: AIChatLinkEnvelope): void {
+  const echo = pendingEcho;
+  if (echo === null || envelope.actor.kind !== "user") return;
+  if (
+    echoRetiredBy(echo.claim, {
+      eventId: envelope.eventId,
+      content: messageContent(envelope.body)
+    })
+  ) {
+    clearPendingEcho();
+  }
+}
+
 function renderMessage(envelope: AIChatLinkEnvelope): void {
   if (eventNodes.has(envelope.eventId)) {
     return;
@@ -1533,12 +1693,6 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
     body.append(reply);
   }
 
-  // blocks (lists, tables, code) live here, so this must not be a paragraph
-  const content = document.createElement("div");
-  content.className = "event-content";
-  renderRichContent(content, messageContent(envelope.body));
-  body.append(content);
-
   const actions = document.createElement("div");
   actions.className = "event-actions";
   const replyButton = document.createElement("button");
@@ -1557,36 +1711,13 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
   });
   actions.append(replyButton, copyButton);
 
-  // A lane shows the operator's prompt as one collapsible line: six full copies
-  // of a long brief would push every Agent's answer below the fold. Room keeps
-  // the original bubble.
-  const lanePrompt =
-    activePane !== null && activePane.lens.kind === "agent" && envelope.actor.kind === "user";
-  if (lanePrompt) {
-    const meta = body.querySelector(".event-meta");
-    meta?.remove();
-    const details = document.createElement("details");
-    details.className = "lane-prompt";
-    const summary = document.createElement("summary");
-    const kicker = document.createElement("span");
-    kicker.className = "lane-prompt-kicker";
-    kicker.textContent = "你";
-    const time = document.createElement("span");
-    time.className = "lane-prompt-time";
-    time.textContent = formatTime(envelope.occurredAt);
-    const excerpt = document.createElement("span");
-    excerpt.className = "lane-prompt-excerpt";
-    const flat = messageContent(envelope.body).replace(/\s+/gu, " ").trim();
-    excerpt.textContent = flat.length > 60 ? `${flat.slice(0, 60)}…` : flat || "（空消息）";
-    summary.append(kicker, time, excerpt);
-    const wrapper = document.createElement("div");
-    wrapper.className = "lane-prompt-body";
-    wrapper.append(...Array.from(body.children), actions);
-    details.append(summary, wrapper);
-    body.append(details);
-  } else {
-    body.append(actions);
-  }
+  appendMessageBody(body, {
+    content: messageContent(envelope.body),
+    occurredAt: envelope.occurredAt,
+    actions,
+    lanePrompt:
+      activePane !== null && activePane.lens.kind === "agent" && envelope.actor.kind === "user"
+  });
   article.append(createActorAvatar(envelope.actor), body);
 
   state.messages.set(envelope.eventId, envelope);
@@ -2472,6 +2603,7 @@ function dispatchEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
     case "adapter.heartbeat":
       return;
     case "message.created": {
+      retirePendingEcho(envelope);
       state.messages.set(envelope.eventId, envelope);
       if (document.hidden && envelope.actor.kind !== "user") {
         unreadCount += 1;
@@ -3216,6 +3348,9 @@ function clearTimelineView(): void {
   state.turns.clear();
   state.transientText.clear();
   state.paneLog = [];
+  // The echo's nodes were swept with the rest of the column; a rebuilt epoch
+  // gets its own copy from the operator's next send, not from this stale one.
+  pendingEcho = null;
   finishedAgents.clear();
   releasedTurnIds.clear();
   syncAgentActivity();
@@ -4132,6 +4267,13 @@ function appendConversationBoundary(text: string): void {
   item.className = "timeline-boundary";
   item.textContent = text;
   timeline.append(item);
+  // A message sent from a replayed conversation belongs *below* the boundary it
+  // opened: the echo was painted before the resume returned, so it has to be
+  // moved down rather than left above the "继续自…" line.
+  const echoItem = pendingEcho?.nodes.get(activePane?.id ?? "");
+  if (echoItem !== undefined && echoItem.isConnected) {
+    timeline.append(echoItem);
+  }
   timelineEmpty.hidden = true;
   trimTimelineIfNeeded();
 }
@@ -5443,6 +5585,10 @@ async function submitMessage(): Promise<void> {
   state.submitting = true;
   setComposerBusy(true);
   setComposerStatus(existing ? "正在使用同一命令 ID 重试…" : "正在提交…");
+  // Paint the operator's own message before waiting on anything. A resume
+  // replaces every native session before the message may be posted, and an
+  // empty column for that long reads as "my message vanished".
+  showPendingEcho(draft.content);
 
   try {
     // Sending inside a replayed conversation is the resume: open the new epoch
@@ -5456,6 +5602,7 @@ async function submitMessage(): Promise<void> {
       method: "POST",
       body: JSON.stringify(draft),
     });
+    recordPendingEchoEventId(accepted);
     // The 202 snapshot closes the gap between the POST and the first SSE frame:
     // without it the button would unlock for a few milliseconds and allow a
     // second send that bypasses the busy lock. seedOnly never regresses a Turn
@@ -5477,6 +5624,9 @@ async function submitMessage(): Promise<void> {
     // lands, so "waiting" is only honest when the room has not answered yet.
     setComposerStatus(acceptedTurnsSeen(accepted) ? "" : DELIVERY_ACK_STATUS);
   } catch (error) {
+    // The text stays in the composer for a retry, so the echo must go: a bubble
+    // that survives a rejected send would claim a message that does not exist.
+    clearPendingEcho();
     setComposerStatus(`${errorMessage(error)}；再次发送会复用同一命令 ID`, true);
   } finally {
     state.submitting = false;

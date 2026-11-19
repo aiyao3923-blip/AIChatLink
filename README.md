@@ -292,7 +292,7 @@ Structured Agent 每回合可通过 AIChatLink MCP（`/mcp`，绑定身份由 Br
 
 ```bash
 npm run typecheck     # 类型检查
-npm test              # 791 项单元与集成测试
+npm test              # 823 项单元与集成测试
 npm run build         # tsc + 复制 web 资源到 dist
 ```
 
