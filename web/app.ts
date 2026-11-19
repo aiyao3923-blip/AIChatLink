@@ -2806,7 +2806,53 @@ function navigateToWorkspace(workspaceId: string, conversationId?: string): void
   }
   if (conversationId === undefined) url.searchParams.delete("conv");
   else url.searchParams.set("conv", conversationId);
-  window.location.assign(url.toString());
+  // Save under the old `?ws=` before the URL moves: drafts are keyed by view.
+  saveDraft();
+  window.history.pushState(null, "", url);
+  void switchWorkspace();
+}
+
+/**
+ * Switch the active working directory in place. A reload does the same, but it
+ * blanks the shell and re-fetches every static asset for a swap the SPA can do
+ * itself. Everything workspace-scoped is reset here; `bootstrap()` refills it
+ * from `?ws=`, so the two paths can never disagree about what a load means.
+ */
+async function switchWorkspace(): Promise<void> {
+  conversationView = null;
+  conversationViewToken += 1;
+  viewingBanner.hidden = true;
+  liveEnvelopeBuffer = null;
+  // Different runtimes do not share a seq space: a cursor from the old room
+  // would make the new stream look like a gap and force a reconnect loop.
+  closeEventSource();
+  state.lastDurableSeq = 0;
+  state.seenEventIds.clear();
+  openEpochStartSeq = FIRST_EPOCH_START_SEQ;
+  retiredTurnIds.clear();
+  // Public memory is per working directory; merging would leak the old room's
+  // records into the new one (loadMemoryRecords only ever adds).
+  state.memories.clear();
+  conversations = [];
+  closeWorkspaceDialog();
+  await bootstrap();
+  restoreDraft();
+}
+
+/** `?conv=` is part of the URL contract, so popstate has to honour it too. */
+async function applyConversationParam(conversationId: string | null): Promise<void> {
+  if (conversationId === null) {
+    if (conversationView !== null) exitConversationView();
+    return;
+  }
+  const target = conversations.find((conversation) => conversation.conversationId === conversationId);
+  if (target === undefined) return;
+  if (target.active) {
+    if (conversationView !== null) exitConversationView();
+    return;
+  }
+  if (conversationView?.conversation.conversationId === conversationId) return;
+  await enterConversationView(target);
 }
 
 function sleep(milliseconds: number): Promise<void> {
@@ -3034,7 +3080,7 @@ function turnIdOf(envelope: AIChatLinkEnvelope): string {
  * append-only: only this live view moves, and closed epochs remain replayable in
  * the replayed conversation view.
  */
-function openConversationEpoch(startSeq: number): void {
+function openConversationEpoch(startSeq: number, options: { repaint?: boolean } = {}): void {
   if (!Number.isSafeInteger(startSeq) || startSeq <= openEpochStartSeq) {
     return;
   }
@@ -3044,7 +3090,9 @@ function openConversationEpoch(startSeq: number): void {
     }
   }
   openEpochStartSeq = startSeq;
-  clearTimelineView();
+  // A caller that repaints right after (the in-place rebuild) must not blank the
+  // column in between; it clears inside the same synchronous paint.
+  if (options.repaint !== false) clearTimelineView();
   void refreshContextUsage();
 }
 
@@ -3883,9 +3931,11 @@ async function startNewConversation(target?: WorkspaceView): Promise<void> {
       navigateToWorkspace(workspaceId);
       return;
     }
-    // A new epoch is live, not a replay: a reload must not re-open `?conv=`.
+    // A new epoch is live, not a replay: drop `?conv=` before repainting.
     syncViewedConversationParam(null);
-    window.location.reload();
+    await refreshConversations();
+    openConversationEpoch(activeEpochStartSeq(conversations), { repaint: false });
+    await rebuildLiveEpoch();
   } catch (error) {
     showGlobalError(errorMessage(error));
   } finally {
@@ -5742,6 +5792,15 @@ function connectEventSource(extraTypes: string[] = []): void {
 /** Live frames held while a view rebuild replaces the timeline. */
 let liveEnvelopeBuffer: AIChatLinkEnvelope[] | null = null;
 
+/** The snapshot's high-water mark: where the live SSE cursor resumes from. */
+function advanceDurableCursor(decoded: Record<string, unknown>): void {
+  const room = isRecord(decoded.room) ? decoded.room : {};
+  const throughSeq = readNumberField(room, "throughSeq") ?? readNumberField(decoded, "throughSeq") ?? 0;
+  if (Number.isSafeInteger(throughSeq) && throughSeq >= 0) {
+    state.lastDurableSeq = Math.max(state.lastDurableSeq, throughSeq);
+  }
+}
+
 /**
  * Paint the open conversation epoch from a `/api/bootstrap` snapshot. First load
  * and an in-place return to live share this renderer, so the two cannot drift.
@@ -5755,7 +5814,6 @@ async function paintLiveEpoch(
   decoded: Record<string, unknown>,
   isCurrent: () => boolean = () => true
 ): Promise<boolean> {
-  const room = isRecord(decoded.room) ? decoded.room : {};
   const replayWindow = extractCollection(decoded, ["recentEvents", "events"])
     .map(normalizeEnvelope)
     .filter((event): event is AIChatLinkEnvelope => event !== null)
@@ -5789,10 +5847,7 @@ async function paintLiveEpoch(
       renderTurn(turn);
     }
   }
-  const throughSeq = readNumberField(room, "throughSeq") ?? readNumberField(decoded, "throughSeq") ?? 0;
-  if (Number.isSafeInteger(throughSeq) && throughSeq >= 0) {
-    state.lastDurableSeq = Math.max(state.lastDurableSeq, throughSeq);
-  }
+  advanceDurableCursor(decoded);
   refreshEmptyStateCopy();
   return true;
 }
@@ -5830,9 +5885,23 @@ async function bootstrap(): Promise<void> {
     renderAgents();
 
     // The room transcript is append-only, so a reload would otherwise replay the
-    // closed conversation that the operator just replaced.
-    openConversationEpoch(activeEpochStartSeq(conversations));
-    await paintLiveEpoch(decoded);
+    // closed conversation that the operator just replaced. No repaint here:
+    // paintLiveEpoch() clears and redraws in one synchronous pass, so the column
+    // never goes empty (a workspace switch reuses this path).
+    openConversationEpoch(activeEpochStartSeq(conversations), { repaint: false });
+    // `?conv=` opens a closed conversation. Painting the live epoch first would
+    // blank the column until the replay fetch returns, so only the cursor moves;
+    // enterConversationView() paints once, after its own fetch.
+    const requestedConversation = new URLSearchParams(window.location.search).get("conv");
+    const replayTarget =
+      requestedConversation !== null && requestedConversation.length > 0
+        ? (conversations.find((conversation) => conversation.conversationId === requestedConversation) ?? null)
+        : null;
+    if (replayTarget !== null && !replayTarget.active) {
+      advanceDurableCursor(decoded);
+    } else {
+      await paintLiveEpoch(decoded);
+    }
 
     for (const value of extractCollection(decoded, ["memory", "memories"])) {
       const record = normalizeRecord(value, false);
@@ -5867,6 +5936,10 @@ async function bootstrap(): Promise<void> {
         showGlobalError("该对话不存在，或已被删除。");
       } else if (!target.active) {
         void enterConversationView(target);
+      } else {
+        // `?conv=` pins a replay. The live epoch needs no pin, and leaving one
+        // means the address bar claims a view the timeline is not showing.
+        syncViewedConversationParam(null);
       }
     }
   } catch (error) {
@@ -6394,6 +6467,20 @@ window.addEventListener("online", () => {
     reconnectAttempt = 0;
     connectEventSource();
   }
+});
+
+// Workspace switches are pushState entries, so Back/Forward must re-apply the
+// URL instead of leaving the shell showing a room the address bar left behind.
+window.addEventListener("popstate", () => {
+  const params = new URLSearchParams(window.location.search);
+  const requested = params.get("ws") ?? "";
+  const target = requested.length === 0 ? primaryWorkspaceId : requested;
+  if (target !== activeWorkspaceId) {
+    saveDraft();
+    void switchWorkspace();
+    return;
+  }
+  void applyConversationParam(params.get("conv"));
 });
 
 window.addEventListener("offline", () => {

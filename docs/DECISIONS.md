@@ -654,7 +654,7 @@ Hermes 0.20.1 的 initialize 当前未声明 `mcpCapabilities.http`，但官方�
 3. **hub 路由 + `?ws=` 反向代理**。主 runtime 的 HTTP server 是唯一 origin：`GET/POST /api/workspaces`、`DELETE /api/workspaces/:id`、`POST /api/workspaces/:id/restart` 只在 hub 提供；写路由要求 `x-aichatlink-setup: 1`。带 `ws` 的房间请求（含 `/api/events` SSE）由 hub 转发到子 origin 并剥掉 `ws`；主 workspace 本地服务；未知 id 404 `WORKSPACE_NOT_FOUND`；子 runtime 未 ready 503 `WORKSPACE_NOT_READY`；`/api/setup*`、`/mcp*`、`/api/runtime/shutdown` 带 `ws` 一律 404。代理流单独跟踪，不进入 `drain()` 的请求计数，避免一条 SSE 拖死优雅关闭。
 4. **关闭必须级联**。hub 的 `#performClose` 在 `beginClose()` 之后、释放监听端口之前执行 `beforeClose`；supervisor 逆序关闭子 runtime（每个有界），再由主 runtime 关闭自己的 session/store。`/api/runtime/shutdown` 与 SIGINT 走同一条路；子 runtime 的 identity 不带 `runtimeScopeKey`，不能单独被控制。
 5. **pi 角色目录按 workspace 隔离**。`LaunchProfile` 增加可选 `env`；AgentSessionManager、上下文摘要器、日期记忆、房间助理都把它合并到 `process.env` 之上，绝不替换整个环境。子 runtime 注入 `PI_SHIM_ROLES_ROOT=<primaryStoreDir>/workspaces/<wsId>/pi-roles`；主 runtime 不注入，保持既有 `.aichatlink/pi-roles` 行为。否则两个 workspace 会共用同一 `mcp.json` 与 `sessions/`，后启动者覆盖先启动者。
-6. **切换 = 整页重载到 `?ws=<id>`**。EventSource、seq 游标、`conversationView`、在飞提交一次性归零，杜绝跨 workspace 状态污染；被切走的 runtime 继续在后台跑。左栏按 workspace 分组拉取 `/api/conversations?ws=`；点他组会话 = `?ws=<目标>&conv=<conversationId>`，加载后调用既有的只读回放；seq 空间不互通，绝不回放源 workspace 的 range。隐藏会话键改为 `<wsId>::<conversationId>`，旧的无前缀键按主目录兼容读取。
+6. **切换 = 定位到 `?ws=<id>`**。EventSource、seq 游标、`conversationView`、在飞提交一次性归零，杜绝跨 workspace 状态污染；被切走的 runtime 继续在后台跑。（原文写的是「整页重载」；隔离语义不变，改为同页重建见 D-058。）左栏按 workspace 分组拉取 `/api/conversations?ws=`；点他组会话 = `?ws=<目标>&conv=<conversationId>`，加载后调用既有的只读回放；seq 空间不互通，绝不回放源 workspace 的 range。隐藏会话键改为 `<wsId>::<conversationId>`，旧的无前缀键按主目录兼容读取。
 7. **界面重排**。顶栏 = 侧栏开关 / 品牌 / Agent 名册（头像、名称、状态点；hover/focus 出现 `⟳` 重启与 `⚙` 配置两个无文字图标）/ 连接点 / 公共记忆 / 助理 / 配置 / 主题。左栏只保留按目录分组的对话；公共记忆移入 `<dialog>`；输入器工作目录改成「＋ 工作目录 …」按钮，打开应用内目录选择器（已添加列表 + 逐层浏览 + 使用此目录 + 移除），新目录创建后轮询 `/api/workspaces` 直到 `ready|failed` 再跳转。连接状态改为 7px 圆点，不再占文字标签。
 
 原因：用户要的不是「切目录时重启整个应用」，而是「同一队 Agent 在几个项目里并行推进」。把每个目录做成独立 runtime，能直接复用既有的 room/epoch/Context Packet/session 语义，代价只是多几个 SQLite 与子进程；反过来在单 runtime 内做多 room，必须重写 `AgentSessionManager` 的 actor 键、broker/context/SSE 的 roomId 与全部 epoch 投影，风险远高于收益。整页重载是最便宜的隔离边界：它把「哪些客户端状态属于哪个 workspace」这个问题直接消掉。
@@ -1418,7 +1418,7 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 4. **重建 = 一次刷新**。`retiredTurnIds` 清空后由快照窗口重建；已见 `eventId` 在重绘前显式删除，
    否则 `acceptEnvelope` 的幂等去重会让整段活纪元画不出来。
 5. **首次加载与原地重建共用 `paintLiveEpoch()`**。两条渲染路径只保留一份实现，避免刷新与切换漂移。
-6. **跨 workspace 仍整页重载**（D-041）：seq 空间不同，游标不能复用。
+6. **跨 workspace 也原地切换**（修订 D-040 第 6 条的「整页重载」）：隔离语义保留——关闭旧 EventSource、`lastDurableSeq` 归零、`seenEventIds` / `memories` / `openEpochStartSeq` 重置——但不再重载页面。`switchWorkspace()` 复用 `bootstrap()`，`history.pushState` 记录目录切换，`popstate` 按 URL 重新应用视图，前进/后退同样不重载。
 7. **兜底**：`/api/bootstrap` 失败时退回 `location.reload()`，原地重建只是优化，不是唯一路径。
 
 | 被否决的方案 | 否决理由 |
@@ -1431,10 +1431,10 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 原因：视图切换不该再付一次整页启动的代价；但「不重载」不能建立在假设上，
 必须让重建路径与刷新路径共用同一个渲染函数，并把 live 帧的竞态显式排队。
 
-完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 811 项）通过；`npm run build` 通过。
-真实实例（4310）三条路径实测——回放→活、活→回放、再回放→活：
+完成标准：`npm run typecheck` 通过；`npm test`（76 文件）通过；`npm run build` 通过。
+真实实例（4310）实测——回放→活、活→回放、再回放→活、跨工作目录（含 `?conv=`）、浏览器后退：
 `performance.getEntriesByType("navigation").length === 1`（无重载），
-rAF 逐帧采样 `emptyFrames === 0`（时间线从未空帧），URL 的 `?conv=` 与 `is-viewing` 同步正确。
+rAF 逐帧采样 `emptyFrames === 0`（时间线从未空帧），URL 的 `?ws=` / `?conv=` 与 `is-viewing` 同步正确。
 
 ## D-058：续聊最新那段对话，折回同一条，不新起一条「· 续」
 

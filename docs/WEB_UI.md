@@ -291,7 +291,7 @@ D-034 曾把历史对话定为纯只读。现在的语义是：**点开是只读
 
 ### 12.1 状态与切换
 
-- **唯一事实源 = URL**：`?ws=<workspaceId>`；缺省即主目录。切换 = `location.assign` 整页重载，EventSource / seq 游标 / 回放视图 / 在飞提交一次性归零。
+- **唯一事实源 = URL**：`?ws=<workspaceId>`；缺省即主目录。切换 = `history.pushState` + 同页重建（`switchWorkspace()` 复用 `bootstrap()`）：EventSource / seq 游标 / 回放视图 / 在飞提交一次性归零，但页面不重载；`popstate` 按 URL 重新应用视图，浏览器前进/后退同样不闪（D-058）。
 - **跨目录点会话**：`?ws=<目标>&conv=<conversationId>`；首屏拿到该目录的 conversations 后，用既有 `enterConversationView()` 打开。绝不跨目录复用 seq range。
 - **`?conv=` 跟着回放走**：进入回放 `replaceState` 写入，退出回放 / 续聊成新纪元 / 新建对话前删除。只写不删会让刷新或跨目录重载按 URL 把刚离开的历史视图重新打开（见 D-042、D-058）。
 - **左栏分组**：`GET /api/workspaces` 拿到主目录 + 已添加目录；每个目录再拉 `/api/conversations?ws=`。主目录在前，其余按注册顺序；失败组必须显示错误而不是空白。
