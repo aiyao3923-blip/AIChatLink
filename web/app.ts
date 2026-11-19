@@ -19,6 +19,7 @@ import {
   sendButtonState,
   type ResumeAfterStopPlan
 } from "./composer-state.js";
+import { draftScopeFrom, readDraft, writeDraft, type DraftScope } from "./draft-scope.js";
 import { parseReasoningRecord } from "./reasoning-record.js";
 import { copyPlainText, flashButtonLabel, renderRichContent } from "./rich-text.js";
 import { describeToolProgress, mergeToolProgressSnapshot } from "./tool-progress.js";
@@ -200,7 +201,11 @@ const RECONNECT_MAX_MS = 10_000;
 const DEFAULT_ROOM_ID = "room:main";
 /** A turn in one of these states may still emit events after a conversation reset. */
 const IN_FLIGHT_TURN_STATUSES = new Set(["dispatching", "running", "cancelling", "cancel_requested"]);
-const DRAFT_STORAGE_KEY = "aichatlink:draft";
+/**
+ * Drafts belong to the view the cursor is in, not to the browser tab. The scope
+ * is derived from the URL because that is what both a reload and a workspace
+ * switch preserve: no view can inherit another view's unsent text.
+ */
 const THEME_STORAGE_KEY = "aichatlink:theme";
 const SIDEBAR_STORAGE_KEY = "aichatlink:sidebar";
 const PANES_STORAGE_KEY = "aichatlink:panes";
@@ -877,35 +882,27 @@ function autoresizeComposer(): void {
   messageInput.style.overflowY = messageInput.scrollHeight > cap ? "auto" : "hidden";
 }
 
+function draftScope(): DraftScope {
+  return draftScopeFrom(window.location.search);
+}
+
 function saveDraft(): void {
-  try {
-    if (messageInput.value) {
-      sessionStorage.setItem(DRAFT_STORAGE_KEY, messageInput.value);
-    } else {
-      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
-    }
-  } catch {
-    // sessionStorage may be unavailable; drafts are best-effort only
-  }
+  writeDraft(sessionStorage, draftScope(), messageInput.value);
 }
 
 function clearDraft(): void {
-  try {
-    sessionStorage.removeItem(DRAFT_STORAGE_KEY);
-  } catch {
-    // sessionStorage may be unavailable; drafts are best-effort only
-  }
+  writeDraft(sessionStorage, draftScope(), "");
+}
+
+function setComposerText(value: string): void {
+  messageInput.value = value;
+  updateCharacterCount();
+  autoresizeComposer();
+  syncSendButton();
 }
 
 function restoreDraft(): void {
-  try {
-    const saved = sessionStorage.getItem(DRAFT_STORAGE_KEY);
-    if (saved) {
-      messageInput.value = saved;
-    }
-  } catch {
-    // sessionStorage may be unavailable; drafts are best-effort only
-  }
+  setComposerText(readDraft(sessionStorage, draftScope()));
 }
 
 function updateCharacterCount(): void {
@@ -3875,10 +3872,16 @@ function syncViewedConversationParam(conversationId: string | null): void {
 async function enterConversationView(conversation: ConversationSummary): Promise<void> {
   conversationViewToken += 1;
   const token = conversationViewToken;
+  // Save the outgoing view's draft before the URL (and therefore the scope)
+  // moves, then restore this conversation's own draft.
+  saveDraft();
   conversationView = { conversation, ranges: conversationRanges(conversation) };
   syncViewedConversationParam(conversation.conversationId);
   syncConversationSelection();
   clearTimelineView();
+  // After the view has been rebuilt: the restore rewrites the composer, and the
+  // send button it syncs must see the new view's (empty) Turn bookkeeping.
+  restoreDraft();
   syncViewingBanner();
   messageInput.focus();
   const ranges = conversationView.ranges;
@@ -3968,6 +3971,7 @@ function syncViewingBanner(): void {
 /** Leave the replayed conversation and return to the live epoch. */
 function exitConversationView(): void {
   if (conversationView === null) return;
+  saveDraft();
   conversationView = null;
   conversationViewToken += 1;
   syncViewedConversationParam(null);

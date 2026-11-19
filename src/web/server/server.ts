@@ -83,6 +83,7 @@ interface StaticAsset {
     | "agent-roster.js"
     | "agent-activity.js"
     | "conversation-epoch.js"
+    | "draft-scope.js"
     | "empty-voice.js"
     | "pagination.js"
     | "pane-lens.js"
@@ -106,6 +107,7 @@ const STATIC_ASSETS = new Map<string, StaticAsset>([
   ["/agent-roster.js", { fileName: "agent-roster.js", contentType: "application/javascript; charset=utf-8" }],
   ["/agent-activity.js", { fileName: "agent-activity.js", contentType: "application/javascript; charset=utf-8" }],
   ["/conversation-epoch.js", { fileName: "conversation-epoch.js", contentType: "application/javascript; charset=utf-8" }],
+  ["/draft-scope.js", { fileName: "draft-scope.js", contentType: "application/javascript; charset=utf-8" }],
   ["/empty-voice.js", { fileName: "empty-voice.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pagination.js", { fileName: "pagination.js", contentType: "application/javascript; charset=utf-8" }],
   ["/pane-lens.js", { fileName: "pane-lens.js", contentType: "application/javascript; charset=utf-8" }],

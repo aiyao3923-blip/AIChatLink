@@ -194,6 +194,9 @@
 - 活动栏不做第二名册：不放名字、driver、状态文字、重启/配置；只有头像、工作环、完成点。
 - 忙碌锁不是审批层：忙碌时草稿、目标选择、单 Turn 取消都可用，忙碌键只表达「终止本轮」，不得用
   `NATIVE_POLICY_BLOCKED` 或 pending request 表达；终止不弹确认框、不自动补发 prompt。
+- **草稿属于视图，不属于标签页**：key = `aichatlink:draft:<ws|primary>:<conv|live>`（`web/draft-scope.ts`）。
+  切对话先存旧视图、再恢复新视图，所以「切走前输入框里是什么，切回来还是什么」；换房间整页 reload 也按 URL 取值，
+  新房间的输入框**不会**继承上一个房间的草稿。
 - 完成点不持久化：不写 localStorage/DB，不跨刷新；它回答「这一轮谁先完成」，不是未读系统。
 - 不在 `prefers-reduced-motion` 下删除「在工作」信号：`tokens.css` 的全局动画重置会豁免
   工作环与发送/终止环（降速到 `--dur-busy` 2400ms），其余过渡与装饰仍按 reduce 关闭（D-049）。
