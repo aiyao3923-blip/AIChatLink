@@ -177,6 +177,12 @@
 - Windows 11「设置 → 辅助功能 → 视觉效果 → 动画效果」关闭即让 Chromium 报 `prefers-reduced-motion: reduce`（来源见 §12 参考）。
 - **实测（无头 Chrome + `emulateMedia({reducedMotion:'reduce'})`）**：同一份 `props` 下，`reduce` 关闭时 230ms 内两帧像素不同（动画可见），`reduce` 打开时两帧完全一致（静止）。
 
+> **实施期更正（2026-11-19）**：真正的杀手是 `web/tokens.css:262` 的 `*` 级
+> `animation-duration: 0.01ms !important` + `animation-iteration-count: 1 !important`
+> 全局重置；本节最初指认的 `styles.css:2555` 只是第二道。实测修复前环的
+> `animation-duration` 为 `1e-05s`、`iteration-count` 为 `1`。修复方式相应改为
+> 「豁免必须写在重置块旁边并带 `!important`」（见 D-049），否则任何组件内规则都打不过它。
+
 **证伪方法**：在真实实例上发一条 `@all`，用 DevTools 读 8 个格子的 `data-working` 与 `getAnimations().length`。
 - 若 8 个都 `data-working=true` 但无动画 → B 成立、A 不成立；
 - 若部分格子 `data-working=false` → A 成立。

@@ -999,6 +999,57 @@ MCP 绑定（溯源）与会话（并发写同一 session 文件会互相破坏�
 1280×800 / 1600×1000 / 430×900 三档截图与改动前**逐像素一致**（PNG md5 相同）；
 1920/2560 两档按上表增长且 `scrollWidth == clientWidth`；`/setup` 同尺度、无横向滚动。
 
+## D-049：活动栏工作环挂在共享账本上，并在 reduced-motion 下改为降速
+
+触发证据：2026-11-19 用户反馈「完成会话的时候右侧的 8 个小图标也不转动了」，且症状随换机出现。
+审计发现**两个互相独立的成因**，任一单独成立都会让环不转：
+
+1. **漏同步**：`trackTurnEnvelope()` 的注释写着「否则忙碌锁与活动栏会漏掉」，但函数体只在
+   `isFinishedTransition`（活→终态）分支里调 `syncAgentActivity()`；另一条同步路径在
+   `renderTurn()` 末尾，而 `renderTurn()` 只在**有窗格接受该 Turn** 时执行
+   （`lensAccepts()` 对 `turn.*` 按 `targetActorId === lens.actorId` 过滤）。
+   实测复现：两个 Agent 车道窗格 + 一个没有窗格的 Agent 收到 `turn.queued` → 该 Agent 的
+   `data-working` 停在 `false`（卡片数 0，账本已更新）。
+2. **动画被全局重置**：`tokens.css` 的 reduce 块是 `*` 级 `animation-duration: 0.01ms !important`
+   + `animation-iteration-count: 1 !important`，`styles.css` 里那条 `animation: none` 只是第二道。
+   Windows 11「辅助功能 → 视觉效果 → 动画效果」关闭即让 Chromium 报
+   `prefers-reduced-motion: reduce`，于是环只跑 0.01ms 一次 = 看起来完全静止。
+   实测（无头 Chrome，`emulateMedia({reducedMotion:'reduce'})`）：修复前环的
+   `animation-duration` 为 `1e-05s`、`iteration-count` 为 `1`。
+
+决定：
+
+1. **同步点下移到共享账本**：`trackTurnEnvelope()` 末尾无条件调 `syncAgentActivity()`，
+   `renderTurn()` 里的调用保留（幂等）。窗格接不接这个 Turn 不再影响活动栏与忙碌锁。
+2. **工作环豁免全局 reduce 重置**：在 `tokens.css` 的重置块内紧跟着写豁免，
+   `animation-duration: var(--dur-busy) !important`（2400ms）+ `infinite !important`；
+   `--dur-busy` 定义在 `:root`。`styles.css` 不再重复声明，只留一句指向注释。
+   理由：MDN 对 `prefers-reduced-motion` 的契约是「移除、减少或替换」，不是必须静止；
+   13px 进度环是**活信号**（冻结会被读成控件卡死），且同一事实另有 `aria-busy`、`title`、
+   完成点三条非动画通道。这是**有意偏离**「reduce = 不动」，登记在此以便复核。
+3. **看门狗**：`syncAgentActivity()` 末尾若「有在跑的 eligible Agent」但轨道里没有任何
+   `data-working="true"`，写一条 `console.warn`（不持久化、不进 UI）。正确实现下不可达，
+   它只负责让同类缺陷以第三种形态复发时立刻可见。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 只修 `styles.css` 的 `animation: none` | 打不过 `tokens.css` 的 `*` + `!important`（本次实测确认） |
+| 直接删掉全局 reduce 重置 | 会连带放开所有过渡与装饰动画，违反对前庭敏感用户的承诺 |
+| reduce 下彻底不动 + 只靠 `title` | 用户失去唯一「还在跑」的视觉信号；`title` 要悬停才可见 |
+| 用 JS `element.animate()` 绕过 CSS 媒体查询 | 引入第二套动画系统，与令牌/主题脱节 |
+
+原因：活动栏回答「谁还在跑」。这个判断必须由 `state.turns` 直接投影，不能依赖「碰巧有窗格画了它」；
+而「在跑」的视觉表达必须在任何系统动效设置下都成立，否则同一句注释会第三次只实现一半。
+
+变更条件：若将来引入 `prefers-reduced-motion: reduce` 之外的无障碍模式（如强制对比度），
+同样按「降速不删除」处理；若看门狗在真实使用中被触发，说明有第三处 Turn 来源绕过了
+`trackTurnEnvelope()`，应先补同步点而不是放宽看门狗。
+
+完成标准：`npm run typecheck`、`npx vitest run` 全通过；`npm run build` 通过；无头 Chrome 探针：
+两个 Agent 车道窗格 + 无窗格 Agent 的 `turn.queued` → 该 Agent `data-working="true"`（修前为 `false`）；
+`emulateMedia(reducedMotion:'reduce')` 下环 `animation-duration` 为 `2.4s`、`iteration-count: infinite`、
+`getAnimations()` 有 1 条 `running`；`.send-spinner` 同为 2.4s。
+
 ## 决策变更规则
 
 任何 Accepted 决策变更必须同时提供：

@@ -2556,16 +2556,8 @@
   opacity: 1;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .composer-agent[data-working="true"] .composer-agent-ring,
-  .send-spinner {
-    animation: none;
-  }
-
-  .composer-agent[data-working="true"] .composer-agent-ring {
-    border-color: var(--tone, var(--accent));
-  }
-}
+/* No reduce-motion override for the busy ring/spinner here: they are exempted
+   from the global animation reset in tokens.css, next to the reset they outrank. */
 
 #character-count[hidden] {
   display: none;

@@ -387,3 +387,4 @@ Broker 指标不含模型网络/推理；只测 Structured session startup/reuse
 | W-031 | 切换不杀回合 | 在目录 A 发起一个回合，立刻切到目录 B，再切回 A；A 的回合仍完成，时间线完整；B 的会话列表不出现 A 的消息；切换通过 `?ws=` 整页重载，EventSource 与 seq 游标重置 |
 | W-032 | 提交确认自动消失 | 发送成功后状态槽显示「已接受，等待 Agent 事件」，该回合首个 `turn.*` 事件或 Agent 消息进入视图后立即清空；若这些事件在 POST 响应前已到达则不显示该确认；错误状态不被自动清空 |
 | W-033 | 显示尺度随屏幕 | 1280×800 / 1600×1000 / 430×900 三档截图与改动前 PNG md5 相同（零回归）；1920 根字号 17.07px、格子 32px；2560 根字号 19.2px、格子 36px、阅读列 1248px；≥3520 封顶 22.4px；五档 `scrollWidth == clientWidth`；`/setup` 顶栏与名册轨道同尺度且无横向滚动 |
+| W-034 | 活动栏工作环必转 | 两个 Agent 车道窗格（`agent:1`/`agent:2`）+ 无窗格的 `agent:5` 收到 `turn.queued` → `agent:5` 格子 `data-working="true"`（修复前为 `false`）；`emulateMedia(reducedMotion:'reduce')` 下环 `animation-duration` 为 `2.4s`、`iteration-count: infinite`、`getAnimations()` 有 1 条 running，`.send-spinner` 同为 2.4s |

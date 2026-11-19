@@ -194,6 +194,10 @@
 - 活动栏不做第二名册：不放名字、driver、状态文字、重启/配置；只有头像、工作环、完成点。
 - 忙碌锁不是审批层：只锁发送（草稿、取消按钮、目标选择都可用），不得用 `NATIVE_POLICY_BLOCKED` 或 pending request 表达。
 - 完成点不持久化：不写 localStorage/DB，不跨刷新；它回答「这一轮谁先完成」，不是未读系统。
+- 不在 `prefers-reduced-motion` 下删除「在工作」信号：`tokens.css` 的全局动画重置会豁免
+  工作环与发送/终止环（降速到 `--dur-busy` 2400ms），其余过渡与装饰仍按 reduce 关闭（D-049）。
+- 活动栏与忙碌锁只能由 `trackTurnEnvelope()` 投影：`renderTurn()` 的同步是幂等补充，
+  不能成为唯一路径——窗格镜头会拒收不属于自己 Agent 的 Turn。
 
 ---
 
@@ -210,6 +214,8 @@
    Enter 提交必须被同一守卫拦下，状态槽不得残留「仍在工作」文案。
 7. 活动栏：只含 enabled 且非 pending_restart 的 Agent；两排网格；工作时环旋转；点击跳最新可见回复并高亮，
    完成点消失。刷新后历史终态不得重新点灯（完成点只来自 live 跃迁）。
+   环的旋转必须在 `prefers-reduced-motion: reduce` 下仍然成立（2.4s 一圈，`iteration-count: infinite`）；
+   多窗格只开 Agent 车道时，没有窗格的 Agent 收到 Turn 后其格子仍必须 `data-working="true"`。
 8. 1600×1000、1280×800、430×900 三档：dock 与活动栏不重叠、不裁切、无横向滚动；
    浮标在 dock 右上方而非压住活动栏。
 

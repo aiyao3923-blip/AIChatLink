@@ -1882,9 +1882,12 @@ function trackTurnEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
   ) {
     finishedAgents.set(targetActorId, { status, turnId });
     announceAgentActivity(targetActorId, status);
-    // The rail must reflect the finish even when no pane paints this Turn.
-    syncAgentActivity();
   }
+  // The rail and the busy lock read `state.turns`, so they are projected here —
+  // in the shared bookkeeping — and not from `renderTurn()`. A pane whose lens
+  // rejects this Agent never paints the Turn, and a rail that only updated while
+  // painting would silently stop spinning for exactly those Agents.
+  syncAgentActivity();
   if (TERMINAL_TURN_STATUSES.has(status)) {
     // A Turn that no pane watches must not keep accumulating delta buffers.
     for (const key of [`turn:${turnId}`, `turn:${turnId}:reasoning`]) {
@@ -4629,6 +4632,21 @@ function syncAgentActivity(): void {
   // during Map iteration is legal, but the copy makes the intent explicit.
   for (const actorId of Array.from(finishedAgents.keys())) {
     if (!railIds.has(actorId)) finishedAgents.delete(actorId);
+  }
+  // Watchdog, not a feature: an eligible Agent with an in-flight Turn must own a
+  // spinning ring. If a future change routes Turns around this projection again,
+  // the console says so instead of silently shipping a still rail.
+  const expected = [...working].filter((actorId) => railIds.has(actorId));
+  if (
+    expected.length > 0 &&
+    composerAgents.querySelector('.composer-agent[data-working="true"]') === null
+  ) {
+    console.warn("[aichatlink] activity rail missing a working ring", {
+      working: expected,
+      rail: Array.from(composerAgents.querySelectorAll<HTMLElement>(".composer-agent")).map(
+        (item) => item.dataset.agent ?? ""
+      )
+    });
   }
   syncSendButton();
 }

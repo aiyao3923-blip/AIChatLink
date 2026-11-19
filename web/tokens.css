@@ -110,6 +110,9 @@
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
   --dur-1: 120ms;
   --dur-2: 180ms;
+  /* Live "still working" indicators rotate slower under reduced motion instead
+     of stopping; see the reduce block at the end of this file. */
+  --dur-busy: 2400ms;
 }
 
 :root[data-theme="dark"] {
@@ -267,5 +270,18 @@ input:disabled {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* Exemption for the two live status indicators (agent work ring and the
+     send/stop spinner). The global reset above is a safety net for decoration
+     and transitions; applying it to a 13px progress ring freezes the only
+     "something is still running" signal, which reads as a stuck control.
+     MDN's contract for prefers-reduced-motion is remove/reduce/replace, so these
+     two rotate at --dur-busy instead of stopping. Must be !important here to
+     outrank the reset above. See docs/WEB_UI.md §四 and D-049. */
+  .composer-agent[data-working="true"] .composer-agent-ring,
+  .send-spinner {
+    animation-duration: var(--dur-busy) !important;
+    animation-iteration-count: infinite !important;
   }
 }
