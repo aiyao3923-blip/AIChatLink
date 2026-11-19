@@ -476,6 +476,21 @@ export class AIChatLinkBroker {
           : this.#store.latestTurnTerminalSeq({ roomId, fromSeq: startSeq, throughSeq: endSeq });
       const shownEndSeq =
         endSeq === null || tailEndSeq === undefined ? endSeq : Math.max(endSeq, tailEndSeq);
+      // Continuing the newest conversation is not a new conversation: the
+      // operator asked to keep going *in* it. Fold the resumed epoch back into
+      // that row instead of emitting a second one titled "… · 续". Only the
+      // immediately preceding projected conversation can accept the fold: if a
+      // conversation with content was created in between, the seq ranges would
+      // interleave, and a real second segment is the honest answer.
+      const foldInto = resume === undefined ? undefined : conversations.at(-1);
+      if (foldInto !== undefined && foldInto.conversationId === resume?.conversationId) {
+        foldInto.endSeq = shownEndSeq;
+        foldInto.active = shownEndSeq === null;
+        foldInto.empty = false;
+        foldInto.resumedFrom = null;
+        titles.set(foldInto.conversationId, foldInto.title);
+        continue;
+      }
       conversations.push({
         conversationId,
         title,

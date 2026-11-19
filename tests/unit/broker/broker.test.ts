@@ -2816,3 +2816,153 @@ describe.sequential("AIChatLinkBroker conversation projection across a reset", (
     expect(cut.endSeq).toBe(terminalEvent.seq);
   });
 });
+
+describe.sequential("AIChatLinkBroker conversation continuity", () => {
+  it("continues the newest conversation in place instead of opening a new one", async () => {
+    const usage = conversationUsage();
+    let fixtureStore: SqliteAIChatLinkStore | undefined;
+    const record = (
+      roomId: string,
+      resetNativeSessions: boolean | undefined,
+      resume?: { conversationId: string; fromSeq: number; throughSeq: number }
+    ): { reset: true; throughSeq: number; resetNativeSessions: boolean; usage: typeof usage } => {
+      const throughSeq = fixtureStore!.getRoomHighWaterSeq(roomId);
+      fixtureStore!.recordContextReset({
+        roomId,
+        throughSeq,
+        ...(resetNativeSessions === undefined ? {} : { resetNativeSessions }),
+        ...(resume === undefined ? {} : { resume })
+      });
+      return {
+        reset: true,
+        throughSeq,
+        resetNativeSessions: resetNativeSessions === true,
+        usage
+      };
+    };
+    const fixture = createFixture({
+      agentController: { restart: async () => undefined, restartFresh: async () => undefined },
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string, resetNativeSessions?: boolean) =>
+          record(roomId, resetNativeSessions),
+        resumeNow: (
+          roomId: string,
+          resume: { conversationId: string; fromSeq: number; throughSeq: number },
+          resetNativeSessions?: boolean
+        ) => record(roomId, resetNativeSessions, resume)
+      }
+    });
+    fixtureStore = fixture.store;
+
+    fixture.store.acceptMessage({
+      sourceBindingId: "binding:web",
+      clientCommandId: "fold-first",
+      roomId: "room:main",
+      targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+      content: "第一段对话的任务"
+    });
+    const original = fixture.broker.listConversations("room:main");
+    expect(original).toHaveLength(1);
+    expect(original[0]).toMatchObject({ conversationId: "conv:1", active: true, endSeq: null });
+
+    // The operator opens a new conversation but says nothing there.
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "fold-reset",
+      roomId: "room:main"
+    });
+
+    // Going back and sending resumes the old conversation…
+    await fixture.broker.resumeConversationFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "fold-resume",
+      conversationId: "conv:1",
+      roomId: "room:main"
+    });
+    fixture.store.acceptMessage({
+      sourceBindingId: "binding:web",
+      clientCommandId: "fold-second",
+      roomId: "room:main",
+      targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+      content: "在旧对话里继续"
+    });
+
+    // …and it stays ONE conversation: same id, same title, live and extendable.
+    const after = fixture.broker.listConversations("room:main");
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({
+      conversationId: "conv:1",
+      title: original[0]!.title,
+      active: true,
+      endSeq: null,
+      resumedFrom: null,
+      empty: false
+    });
+  });
+
+  it("keeps a real second segment when another conversation happened in between", async () => {
+    const usage = conversationUsage();
+    let fixtureStore: SqliteAIChatLinkStore | undefined;
+    const record = (
+      roomId: string,
+      resume?: { conversationId: string; fromSeq: number; throughSeq: number }
+    ): { reset: true; throughSeq: number; resetNativeSessions: boolean; usage: typeof usage } => {
+      const throughSeq = fixtureStore!.getRoomHighWaterSeq(roomId);
+      fixtureStore!.recordContextReset({ roomId, throughSeq, ...(resume === undefined ? {} : { resume }) });
+      return { reset: true, throughSeq, resetNativeSessions: true, usage };
+    };
+    const fixture = createFixture({
+      agentController: { restart: async () => undefined, restartFresh: async () => undefined },
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string) => record(roomId),
+        resumeNow: (
+          roomId: string,
+          resume: { conversationId: string; fromSeq: number; throughSeq: number }
+        ) => record(roomId, resume)
+      }
+    });
+    fixtureStore = fixture.store;
+
+    const seed = (id: string, content: string): void => {
+      fixture.store.acceptMessage({
+        sourceBindingId: "binding:web",
+        clientCommandId: id,
+        roomId: "room:main",
+        targets: [{ actorId: "agent:codex", adapterId: "codex", transport: "structured" }],
+        content
+      });
+    };
+    seed("seg-first", "第一段");
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "seg-reset",
+      roomId: "room:main"
+    });
+    seed("seg-second", "第二段");
+
+    await fixture.broker.resumeConversationFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "seg-resume",
+      conversationId: "conv:1",
+      roomId: "room:main"
+    });
+
+    const conversations = fixture.broker.listConversations("room:main");
+    const resumed = conversations.find((entry) => entry.resumedFrom !== null)!;
+    expect(resumed).toMatchObject({
+      resumedFrom: { conversationId: "conv:1" },
+      active: true
+    });
+    expect(resumed.title).toContain("· 续");
+    // The conversation in between keeps its own row: the ranges do not
+    // interleave, so a real second segment is the honest projection.
+    expect(conversations).toHaveLength(3);
+    expect(conversations[0]).toBe(resumed);
+    expect(conversations.at(-1)?.conversationId).toBe("conv:1");
+    expect(conversations[1]?.conversationId).not.toBe("conv:1");
+  });
+});
