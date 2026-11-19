@@ -294,7 +294,8 @@ describe("conversation resume contracts", () => {
             title: "plan",
             fromSeq: 1,
             throughSeq: 11
-          }
+          },
+          ranges: [{ fromSeq: 12, throughSeq: 20 }]
         },
         {
           conversationId: "conv:1",
@@ -304,11 +305,13 @@ describe("conversation resume contracts", () => {
           startedAt: "2026-08-11T00:00:00.000Z",
           active: false,
           empty: false,
-          resumedFrom: null
+          resumedFrom: null,
+          ranges: [{ fromSeq: 1, throughSeq: 11 }]
         }
       ]
     });
     expect(parsed.conversations[0]?.resumedFrom?.throughSeq).toBe(11);
+    expect(parsed.conversations[0]?.ranges).toEqual([{ fromSeq: 12, throughSeq: 20 }]);
     expect(parsed.conversations[1]?.resumedFrom).toBeNull();
     expect(() =>
       parseConversationList({
@@ -319,7 +322,8 @@ describe("conversation resume contracts", () => {
             startSeq: 12,
             endSeq: null,
             startedAt: "2026-08-11T00:00:00.000Z",
-            active: true
+            active: true,
+            ranges: []
           }
         ]
       })

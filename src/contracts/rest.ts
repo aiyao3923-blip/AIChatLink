@@ -54,6 +54,11 @@ export const ResumedConversationSchema = z.strictObject({
   throughSeq: z.number().int().positive()
 });
 
+export const ConversationRangeSchema = z.strictObject({
+  fromSeq: z.number().int().positive(),
+  throughSeq: z.number().int().positive()
+});
+
 export const ConversationSummarySchema = z.strictObject({
   conversationId: z.string().min(1).max(64),
   title: z.string().min(1).max(200),
@@ -64,7 +69,13 @@ export const ConversationSummarySchema = z.strictObject({
   /** The open epoch holds no room-context message yet; the sidebar hides it. */
   empty: z.boolean(),
   /** Closed conversation this epoch was resumed from, if any. */
-  resumedFrom: ResumedConversationSchema.nullable()
+  resumedFrom: ResumedConversationSchema.nullable(),
+  /**
+   * Seq ranges this conversation actually occupies, in order. A conversation
+   * continues across epochs, so its own segments may be separated by another
+   * conversation's events; replaying only these ranges keeps the two apart.
+   */
+  ranges: z.array(ConversationRangeSchema).max(64)
 });
 
 export const ConversationListSchema = z.strictObject({
