@@ -808,11 +808,11 @@
   position: relative;
 }
 
-/* Floating reading controls: bottom-right of the reading column, just above
-   the composer. Geometry comes from app.ts because the composer grows with the
-   reply strip and progress card. The stack grows upward, so the message index
-   (对话目录) sits above the "back to latest" arrow and keeps its place when the
-   arrow is hidden. */
+/* Floating reading controls: one stack per pane, bottom-right of that pane's
+   reading column, just above the composer. Geometry comes from app.ts because
+   the composer grows with the reply strip and progress card. The stack grows
+   upward, so the message index (对话目录) sits above the "back to latest" arrow
+   and keeps its place when the arrow is hidden. */
 .timeline-actions {
   position: absolute;
   right: var(--jump-latest-right, calc(24 * var(--px)));
@@ -4364,6 +4364,7 @@
 }
 
 .pane {
+  position: relative;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -4459,39 +4460,6 @@
   background: var(--faint);
 }
 
-.pane-jump {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  height: 24px;
-  padding: 0 6px;
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-pill);
-  background: var(--paper);
-  color: var(--ink-2);
-  font-family: var(--font-mono);
-  font-size: var(--fs-10);
-  cursor: pointer;
-}
-
-.pane-jump:hover {
-  border-color: var(--line-3);
-  color: var(--accent-deep);
-}
-
-.pane-jump svg {
-  width: 12px;
-  height: 12px;
-}
-
-.pane-jump[hidden] {
-  display: none;
-}
-
-.pane-jump-count[hidden] {
-  display: none;
-}
-
 .pane-close {
   display: grid;
   place-items: center;
@@ -4522,7 +4490,14 @@ html[data-panes="single-room"] .pane-head {
 }
 
 html[data-panes="grid"] .timeline-actions {
-  display: none;
+  /* A lane can be a third of the column: anchor the stack to that pane and cap
+     the index panel by the pane width instead of the viewport. */
+  right: calc(12 * var(--px));
+  width: min(calc(360 * var(--px)), calc(100% - 24px));
+}
+
+html[data-panes="grid"] .toc-panel {
+  width: 100%;
 }
 
 html[data-panes="grid"] .pane .timeline {

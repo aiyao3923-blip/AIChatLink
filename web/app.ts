@@ -296,11 +296,9 @@ const composerWorkspacePath = byId<HTMLSpanElement>("composer-workspace-path");
 const globalError = byId<HTMLDivElement>("global-error");
 const agentList = byId<HTMLUListElement>("agent-list");
 const agentCount = byId<HTMLSpanElement>("agent-count");
-/** Assigned by usePaneContext(); the primary pane owns the static #timeline. */
+/** Assigned by usePaneContext(); every pane owns its own reading controls. */
 let timeline!: HTMLOListElement;
 let timelineEmpty!: HTMLLIElement;
-const legacyJumpLatest = byId<HTMLButtonElement>("jump-latest");
-const legacyJumpLatestCount = byId<HTMLSpanElement>("jump-latest-count");
 let jumpLatest!: HTMLButtonElement;
 let jumpLatestCount!: HTMLSpanElement;
 const composer = byId<HTMLFormElement>("composer");
@@ -332,10 +330,6 @@ const sidebarToggle = byId<HTMLButtonElement>("sidebar-toggle");
 const conversationGroups = byId<HTMLDivElement>("conversation-groups");
 const newConversationButton = byId<HTMLButtonElement>("new-conversation");
 const newRoomButton = byId<HTMLButtonElement>("new-room");
-const conversationTocButton = byId<HTMLButtonElement>("conversation-toc");
-const conversationTocPanel = byId<HTMLElement>("conversation-toc-panel");
-const conversationTocList = byId<HTMLOListElement>("conversation-toc-list");
-const conversationTocClose = byId<HTMLButtonElement>("conversation-toc-close");
 const viewingBanner = byId<HTMLElement>("viewing-banner");
 const viewingBannerTitle = byId<HTMLElement>("viewing-banner-title");
 const viewingBannerNote = byId<HTMLElement>("viewing-banner-note");
@@ -1237,15 +1231,6 @@ function resetJumpLatest(): void {
   jumpLatest.hidden = true;
 }
 
-/** Visible whenever the reading position is off the bottom, growth included. */
-function syncJumpLatest(): void {
-  if (roomFollow.isNearBottom()) {
-    resetJumpLatest();
-    return;
-  }
-  jumpLatest.hidden = false;
-}
-
 function noteJumpLatest(countsAsNew: boolean): void {
   if (countsAsNew) {
     newWhileScrolledUp += 1;
@@ -1283,10 +1268,39 @@ function syncJumpLatestGeometry(): void {
   );
 }
 
+/**
+ * One clearance per pane: the stack parks just above the composer when the pane
+ * runs under it, and at its own bottom edge when the pane ends higher up. That
+ * keeps a short top-row lane from floating its controls mid-air, and keeps a
+ * bottom-row lane clear of the dock.
+ */
+function syncPaneActionGeometry(): void {
+  if (!conversationPanel) return;
+  const dock = composerDock.getBoundingClientRect();
+  if (dock.height <= 0) return;
+  const dockTop = dock.top;
+  const inset = designPx(12);
+  for (const pane of panes) {
+    const box = pane.shell.section.getBoundingClientRect();
+    if (box.height <= 0) continue;
+    const clearance = Math.round(box.bottom - dockTop + inset);
+    const bottom = Math.max(inset, Math.min(clearance, Math.round(box.height - inset)));
+    pane.shell.toc.stack.style.setProperty("--jump-latest-bottom", `${bottom}px`);
+  }
+}
+
 const jumpGeometryObserver =
-  typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => syncJumpLatestGeometry());
+  typeof ResizeObserver === "undefined"
+    ? null
+    : new ResizeObserver(() => {
+        syncJumpLatestGeometry();
+        syncPaneActionGeometry();
+      });
 jumpGeometryObserver?.observe(composerDock);
-window.addEventListener("resize", syncJumpLatestGeometry);
+window.addEventListener("resize", () => {
+  syncJumpLatestGeometry();
+  syncPaneActionGeometry();
+});
 
 observeTimelineGrowth(assistantTimeline, () => {
   if (!assistantFollow.isPaused()) assistantFollow.followIfAllowed();
@@ -1345,7 +1359,7 @@ function trimTimelineIfNeeded(): void {
     timeline.prepend(trimNoticeNode);
   }
   trimNoticeNode.textContent = `已收起 ${trimmedItemCount} 条较早消息`;
-  if (conversationTocOpen && activePane !== null && activePane === panes[0]) renderConversationToc();
+  if (activePane?.tocOpen === true) renderConversationToc(activePane);
 }
 
 function appendTimeline(node: HTMLLIElement, countsAsNew = true): void {
@@ -1577,9 +1591,8 @@ function renderMessage(envelope: AIChatLinkEnvelope): void {
 
   state.messages.set(envelope.eventId, envelope);
   eventNodes.set(envelope.eventId, article);
-  if (envelope.actor.kind === "user" && activePane !== null && activePane === panes[0]) {
-    conversationTocButton.hidden = false;
-    if (conversationTocOpen) renderConversationToc();
+  if (envelope.actor.kind === "user") {
+    syncConversationToc(activePane);
   }
   if (!item.isConnected) {
     maybeInsertDateDivider(envelope.occurredAt);
@@ -2917,7 +2930,6 @@ let conversations: ConversationSummary[] = [];
 let collapsedWorkspaceIds = readCollapsedWorkspaceIds();
 let conversationView: ConversationView | null = null;
 let conversationViewToken = 0;
-let conversationTocOpen = false;
 
 function readCollapsedWorkspaceIds(): Set<string> {
   try {
@@ -3194,6 +3206,8 @@ function clearTimelineView(): void {
     pane.trimNotice = null;
     pane.pendingNew = 0;
     resetJumpLatest();
+    setConversationTocOpen(false, pane);
+    syncConversationToc(pane);
   }
   if (panes.length > 0) {
     usePaneContext(panes[0]!);
@@ -3205,8 +3219,6 @@ function clearTimelineView(): void {
   finishedAgents.clear();
   releasedTurnIds.clear();
   syncAgentActivity();
-  conversationTocButton.hidden = true;
-  setConversationTocOpen(false);
   unreadCount = 0;
   document.title = BASE_TITLE;
   if (state.replyToEventId !== null) {
@@ -4057,8 +4069,8 @@ async function enterConversationView(conversation: ConversationSummary): Promise
   for (const pane of panes) {
     pane.follow.resume(false);
     pane.follow.scrollToLatest(false);
+    syncConversationToc(pane);
   }
-  syncConversationToc();
 }
 
 /** Replay one durable seq range without moving the live cursor. */
@@ -4178,8 +4190,8 @@ async function rebuildLiveEpoch(): Promise<void> {
     for (const pane of panes) {
       pane.follow.resume(false);
       pane.follow.scrollToLatest(false);
+      syncConversationToc(pane);
     }
-    syncConversationToc();
     void refreshConversations();
     void refreshContextUsage();
   } catch {
@@ -4204,14 +4216,17 @@ function appendResumeBoundary(conversation: ConversationSummary): void {
 }
 
 /** Only what the operator sent: the index is a table of contents, not a log. */
-function userPromptEntries(): Array<{ eventId: string; content: string }> {
+function userPromptEntries(pane: PaneContext | null = activePane): Array<{
+  eventId: string;
+  content: string;
+}> {
   const entries: Array<{ eventId: string; content: string }> = [];
+  if (pane === null) return entries;
   for (const envelope of state.messages.values()) {
     if (envelope.actor.kind !== "user") continue;
     // A collapsed (trimmed) bubble has no node left to jump to, so it is not an
-    // index entry: every number in the panel must land somewhere. The index is a
-    // reading tool for the primary pane, never a lane.
-    if (!panes[0]?.eventNodes.has(envelope.eventId)) continue;
+    // index entry: every number in the panel must land inside this pane.
+    if (!pane.eventNodes.has(envelope.eventId)) continue;
     const content = messageContent(envelope.body).replace(/\s+/gu, " ").trim();
     if (content.length === 0) continue;
     entries.push({ eventId: envelope.eventId, content });
@@ -4219,11 +4234,17 @@ function userPromptEntries(): Array<{ eventId: string; content: string }> {
   return entries;
 }
 
-function renderConversationToc(): void {
-  const entries = userPromptEntries();
-  conversationTocButton.hidden = entries.length === 0;
-  if (!conversationTocOpen) return;
-  conversationTocList.replaceChildren();
+/**
+ * One index per pane. A lane pane lists the operator prompts that pane shows, so
+ * a number can never point at a node another pane drew.
+ */
+function renderConversationToc(pane: PaneContext | null = activePane): void {
+  if (pane === null) return;
+  const entries = userPromptEntries(pane);
+  const toc = pane.shell.toc;
+  toc.button.hidden = entries.length === 0;
+  if (!pane.tocOpen) return;
+  toc.list.replaceChildren();
   for (const [index, entry] of entries.entries()) {
     const item = document.createElement("li");
     const button = document.createElement("button");
@@ -4239,31 +4260,40 @@ function renderConversationToc(): void {
       entry.content.length > 160 ? `${entry.content.slice(0, 160)}…` : entry.content;
     button.append(badge, snippet);
     button.addEventListener("click", () => {
-      setConversationTocOpen(false);
-      jumpToEvent(entry.eventId);
+      setConversationTocOpen(false, pane);
+      jumpToEvent(entry.eventId, pane);
     });
     item.append(button);
-    conversationTocList.append(item);
+    toc.list.append(item);
   }
   if (entries.length === 0) {
     const empty = document.createElement("li");
     empty.className = "toc-empty";
     empty.textContent = "这段对话里还没有你发送的消息。";
-    conversationTocList.append(empty);
+    toc.list.append(empty);
   }
 }
 
-function setConversationTocOpen(open: boolean): void {
-  conversationTocOpen = open;
-  conversationTocPanel.hidden = !open;
-  conversationTocButton.setAttribute("aria-expanded", open ? "true" : "false");
-  if (open) renderConversationToc();
+/** Only one index is open at a time; opening another pane's closes the first. */
+function setConversationTocOpen(open: boolean, pane: PaneContext | null = activePane): void {
+  if (pane === null) return;
+  if (open) {
+    for (const other of panes) {
+      if (other !== pane) setConversationTocOpen(false, other);
+    }
+  }
+  const toc = pane.shell.toc;
+  pane.tocOpen = open;
+  toc.panel.hidden = !open;
+  toc.button.setAttribute("aria-expanded", open ? "true" : "false");
+  if (open) renderConversationToc(pane);
 }
 
-/** Keep the index in step with rendered prompts without rebuilding it on every turn. */
-function syncConversationToc(): void {
-  conversationTocButton.hidden = userPromptEntries().length === 0;
-  if (conversationTocOpen) renderConversationToc();
+/** Keep one pane's index in step with its rendered prompts. */
+function syncConversationToc(pane: PaneContext | null = activePane): void {
+  if (pane === null) return;
+  pane.shell.toc.button.hidden = userPromptEntries(pane).length === 0;
+  if (pane.tocOpen) renderConversationToc(pane);
 }
 
 function jumpToNode(target: HTMLElement, pane: PaneContext = panes[0]!): void {
@@ -4278,7 +4308,7 @@ function jumpToEvent(eventId: string, pane: PaneContext = panes[0]!): void {
   const target = pane?.eventNodes.get(eventId);
   if (!target) {
     // The bubble was collapsed between painting the panel and the click.
-    renderConversationToc();
+    renderConversationToc(pane);
     return;
   }
   jumpToNode(target, pane);
@@ -4459,7 +4489,6 @@ interface PaneContext {
   id: string;
   lens: PaneLens;
   shell: PaneShell;
-  primary: boolean;
   timeline: HTMLOListElement;
   empty: HTMLLIElement;
   follow: ReturnType<typeof createLatestFollower>;
@@ -4471,6 +4500,8 @@ interface PaneContext {
   trimNotice: HTMLLIElement | null;
   lastDate: string;
   pendingNew: number;
+  /** This pane's message index is open; only one pane keeps it open. */
+  tocOpen: boolean;
 }
 
 let panes: PaneContext[] = [];
@@ -4482,14 +4513,15 @@ function isSingleRoomMode(): boolean {
   return panes.length === 1 && panes[0]!.lens.kind === "room";
 }
 
+/**
+ * Every pane owns a floating "back to latest" arrow; the lane header no longer
+ * carries a second one. The arrow is projected from that pane's follow state.
+ */
 function paneJumpControl(pane: PaneContext): {
   button: HTMLButtonElement;
   count: HTMLSpanElement;
 } {
-  if (pane.primary && isSingleRoomMode()) {
-    return { button: legacyJumpLatest, count: legacyJumpLatestCount };
-  }
-  return { button: pane.shell.jump, count: pane.shell.jumpCount };
+  return { button: pane.shell.toc.jump, count: pane.shell.toc.jumpCount };
 }
 
 /** Project this pane's follow state onto whichever control is currently visible. */
@@ -4544,12 +4576,11 @@ function usePaneContext(pane: PaneContext): void {
   renderPaneJumpState(pane);
 }
 
-function makePaneContext(shell: PaneShell, lens: PaneLens, primary: boolean): PaneContext {
+function makePaneContext(shell: PaneShell, lens: PaneLens): PaneContext {
   const pane: PaneContext = {
     id: shell.section.dataset.paneId ?? "pane",
     lens,
     shell,
-    primary,
     timeline: shell.timeline,
     empty: shell.empty,
     follow: createLatestFollower(shell.timeline, {
@@ -4565,7 +4596,8 @@ function makePaneContext(shell: PaneShell, lens: PaneLens, primary: boolean): Pa
     trimCount: 0,
     trimNotice: null,
     lastDate: "",
-    pendingNew: 0
+    pendingNew: 0,
+    tocOpen: false
   };
   shell.select.addEventListener("change", () => {
     const index = panes.indexOf(pane);
@@ -4578,7 +4610,12 @@ function makePaneContext(shell: PaneShell, lens: PaneLens, primary: boolean): Pa
     const index = panes.indexOf(pane);
     if (index >= 0) removePaneAt(index);
   });
-  shell.jump.addEventListener("click", () => pane.follow.resume());
+  shell.toc.button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setConversationTocOpen(!pane.tocOpen, pane);
+  });
+  shell.toc.close.addEventListener("click", () => setConversationTocOpen(false, pane));
+  shell.toc.jump.addEventListener("click", () => pane.follow.resume());
   shell.timeline.addEventListener("scroll", () => renderPaneJumpState(pane), { passive: true });
   observeTimelineGrowth(shell.timeline, () => {
     if (!pane.follow.isPaused()) pane.follow.followIfAllowed();
@@ -4700,8 +4737,10 @@ function syncPaneChrome(): void {
     pane.shell.close.hidden = panes.length <= 1;
     pane.shell.close.setAttribute("aria-label", `关闭窗格 ${paneLensLabel(pane.lens)}`);
     renderPaneJumpState(pane);
+    syncConversationToc(pane);
   }
   syncJumpLatestGeometry();
+  syncPaneActionGeometry();
 }
 
 function clearPaneDom(pane: PaneContext): void {
@@ -4729,6 +4768,8 @@ function clearPaneDom(pane: PaneContext): void {
   pane.trimNotice = null;
   pane.lastDate = "";
   pane.pendingNew = 0;
+  setConversationTocOpen(false, pane);
+  syncConversationToc(pane);
   renderPaneJumpState(pane);
 }
 
@@ -4743,6 +4784,7 @@ function repaintPane(pane: PaneContext): void {
     paintEnvelope(entry.envelope);
   }
   refreshPaneEmptyCopy(pane);
+  syncConversationToc(pane);
   if (panes.length > 0) {
     usePaneContext(panes[0]!);
   }
@@ -4759,7 +4801,7 @@ function applyPanes(nextLenses: PaneLens[]): void {
   while (panes.length < lenses.length) {
     const shell = createPaneShell({ id: `pane-${panes.length}`, primary: false });
     paneGrid.append(shell.section);
-    const pane = makePaneContext(shell, roomLens(), false);
+    const pane = makePaneContext(shell, roomLens());
     panes.push(pane);
     created.add(pane);
   }
@@ -4874,9 +4916,6 @@ function closePanesDialog(): void {
 }
 
 function bindPanesUi(): void {
-  legacyJumpLatest.addEventListener("click", () => {
-    panes[0]?.follow.resume();
-  });
   panesToggle.addEventListener("click", openPanesDialog);
   panesClose.addEventListener("click", closePanesDialog);
   panesLayouts.addEventListener("click", (event) => {
@@ -4904,7 +4943,7 @@ function initPanes(): void {
     timeline: byId<HTMLOListElement>("timeline"),
     empty: byId<HTMLLIElement>("timeline-empty")
   });
-  const primary = makePaneContext(primaryShell, roomLens(), true);
+  const primary = makePaneContext(primaryShell, roomLens());
   panes = [primary];
   activePane = null;
   usePaneContext(primary);
@@ -6130,26 +6169,29 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("scroll", closeWorkspaceMenu, true);
 window.addEventListener("resize", closeWorkspaceMenu);
 
-conversationTocButton.addEventListener("click", (event) => {
-  event.stopPropagation();
-  setConversationTocOpen(!conversationTocOpen);
-});
-
-conversationTocClose.addEventListener("click", () => setConversationTocOpen(false));
+/** The pane whose index is open, if any. */
+function openTocPane(): PaneContext | null {
+  return panes.find((pane) => pane.tocOpen) ?? null;
+}
 
 document.addEventListener("click", (event) => {
-  if (!conversationTocOpen) return;
+  const pane = openTocPane();
+  if (pane === null) return;
   const target = event.target as Node | null;
-  if (target !== null && (conversationTocPanel.contains(target) || conversationTocButton.contains(target))) {
+  if (
+    target !== null &&
+    (pane.shell.toc.panel.contains(target) || pane.shell.toc.button.contains(target))
+  ) {
     return;
   }
-  setConversationTocOpen(false);
+  setConversationTocOpen(false, pane);
 });
 
 document.addEventListener("keydown", (event) => {
-  if (event.key !== "Escape" || !conversationTocOpen) return;
-  setConversationTocOpen(false);
-  conversationTocButton.focus();
+  const pane = openTocPane();
+  if (event.key !== "Escape" || pane === null) return;
+  setConversationTocOpen(false, pane);
+  pane.shell.toc.button.focus();
 });
 
 viewingBannerExit.addEventListener("click", exitConversationView);
@@ -6517,7 +6559,7 @@ syncSendButton();
 autoresizeAssistant();
 syncAssistantSendButton();
 syncJumpLatestGeometry();
-syncJumpLatest();
+syncPaneActionGeometry();
 
 window.addEventListener("online", () => {
   if (!eventSource) {

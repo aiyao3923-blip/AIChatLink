@@ -153,67 +153,6 @@
         </ol>
         </div>
 
-        <div id="timeline-actions" class="timeline-actions">
-          <section
-            id="conversation-toc-panel"
-            class="toc-panel"
-            aria-label="对话目录"
-            hidden
-          >
-            <header class="toc-head">
-              <div>
-                <p class="eyebrow">My messages</p>
-                <h2>对话目录</h2>
-              </div>
-              <button id="conversation-toc-close" class="icon-button" type="button" aria-label="关闭对话目录">×</button>
-            </header>
-            <ol id="conversation-toc-list" class="toc-list"></ol>
-          </section>
-          <button
-            id="conversation-toc"
-            class="floating-action"
-            type="button"
-            title="对话目录：只看我发过的消息，点击跳到原位置"
-            aria-label="对话目录"
-            aria-expanded="false"
-            aria-controls="conversation-toc-panel"
-            hidden
-          >
-            <svg class="floating-action-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <circle cx="5" cy="7" r="1.15" fill="currentColor"/>
-              <circle cx="5" cy="12" r="1.15" fill="currentColor"/>
-              <circle cx="5" cy="17" r="1.15" fill="currentColor"/>
-              <path
-                d="M9 7h10M9 12h10M9 17h10"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              />
-            </svg>
-          </button>
-          <button
-            id="jump-latest"
-            class="floating-action jump-latest"
-            type="button"
-            title="回到最新进度"
-            aria-label="回到最新进度"
-            hidden
-          >
-            <svg class="jump-latest-arrow" viewBox="0 0 24 24" aria-hidden="true">
-              <path
-                d="M12 4.8v13.4m-5.6-5.6 5.6 5.6 5.6-5.6"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              />
-            </svg>
-            <span id="jump-latest-count" class="jump-latest-count" hidden></span>
-          </button>
-        </div>
-
         <div id="composer-dock" class="composer-dock">
         <form id="composer" class="composer">
           <div id="reply-context" class="reply-context" hidden>

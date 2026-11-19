@@ -203,7 +203,9 @@ A：`localStorage["aichatlink:panes"] = {"count":4,"lenses":["agent:…","agent:
   右侧 `[↓ N] [×]`。`×` 在 `count===1` 时隐藏；`↓` 只在离底 >120px 时出现。
 - 空态：每格自己的 `<li class="pane-empty">`（不是 `#timeline-empty` 的克隆），文案按镜片区分（§5.4）。
 - 单窗格 + `room`：`html[data-panes="single-room"]` → 隐藏窗格头、隐藏窗格墙的发丝线、显示既有
-  `#timeline-actions`（对话目录 + 底部浮标）；其余模式 → 显示窗格头、隐藏既有浮标栈。**两种模式不并存**。
+  `#timeline-actions`（对话目录 + 底部浮标）；其余模式 → 显示窗格头，**每格各有一套浮标栈**。
+  > 2026-11-19 修订（D-062）：原计划的「其余模式隐藏浮标栈、由窗格头 `↓` 接管」已作废——
+  > 用户在车道里也要这两个按键，且必须每格一套；窗格头不再放 `↓`。
 
 ### 5.2 被否决的方案（附硬约束）
 
@@ -273,7 +275,7 @@ localStorage["aichatlink:panes"] = {"count":4,"lenses":["agent:pi-architect","ag
 | :--- | :--- |
 | 历史回放 `?conv=` | 所有窗格按同一 `conversationView` 回放；agent 车道只显示该 Agent 的历史段；`?conv=` 语义不变 |
 | 忙碌锁 / 活动栏（D-044） | 完全不变：读 `state.turns`，与窗格数量无关；活动栏点击跳到**该 Agent 所在的车道**（没有车道就跳主格） |
-| 对话目录（TOC） | 只在 `single-room` 基线显示；多窗格时隐藏（它是阅读工具，不是监看工具） |
+| 对话目录（TOC） | 每个窗格各一套，只索引本格节点（2026-11-19 修订，D-062；原「只在 single-room 显示」作废） |
 | `context.reset` | 清空所有窗格的 DOM/节点表/裁剪状态 + 清空回填日志；空态文案逐格刷新 |
 | workspace 切换 | 整页重载（D-040 不变）；布局键跨目录共享（同一台机器的偏好） |
 | 房间助理抽屉 | 不变；抽屉打开时窗格墙随主列收窄，`grid-auto-rows` 自然压缩 |
@@ -452,8 +454,8 @@ function openPanesDialog(): void;
 
 `panes[0]` 始终存在且持有 `#timeline` / `#timeline-empty`。基线（`count===1 && lens.kind==="room"`）：
 `data-panes="single-room"`，隐藏窗格头与 `#panes` 发丝线，保留 `#timeline-actions`、
-`syncJumpLatestGeometry()`、`#jump-latest` 的既有行为；非基线时 `data-panes="grid"`，隐藏 `#timeline-actions`，
-每格头部 `↓` 接管。
+`syncJumpLatestGeometry()` 的既有行为；非基线时 `data-panes="grid"`，每格仍有自己的
+`.timeline-actions`，几何按格与 composer dock 计算（D-062）。
 
 ### 6.6 `src/web/server/server.ts`
 
@@ -578,7 +580,7 @@ npm run build
 6. 持久化：
    - 刷新后 `count`/`lenses` 保持；把某 Agent 从名册移除（或改配置）后，该格回落 `room`。
 7. 基线零回归：
-   - 切回「单窗格（房间）」：窗格头消失、既有浮标与对话目录回来、`#jump-latest` 正常；
+   - 切回「单窗格（房间）」：窗格头消失、浮标与对话目录与基线一致；多窗格时每格浮标与目录都在（D-062）；
    - 1600×1000 / 1280×800 / 430×900 三档无横向滚动；
    - 暗色下窗格头/状态点/折叠提示可辨。
 8. 忙碌锁：
