@@ -390,6 +390,13 @@ const registeredEventTypes = new Set<string>(DOCUMENTED_EVENT_TYPES);
 const retryCommandIds = new Map<string, string>();
 const closedStreamKeys = new Set<string>();
 const finishedAgents = new Map<string, FinishedAgent>();
+/**
+ * Turns whose cancellation the Broker accepted. They stay non-terminal in the store until
+ * the native side settles, but the operator has ended them, so they must stop holding the
+ * send button and the activity rail. Otherwise a slow native cancel leaves a spinner and a
+ * locked composer on a room the operator already stopped (D-053).
+ */
+const releasedTurnIds = new Set<string>();
 let composerRailSignature = "";
 
 let eventSource: EventSource | null = null;
@@ -1896,6 +1903,7 @@ function trackTurnEnvelope(envelope: AIChatLinkEnvelope, live: boolean): void {
   // painting would silently stop spinning for exactly those Agents.
   syncAgentActivity();
   if (TERMINAL_TURN_STATUSES.has(status)) {
+    releasedTurnIds.delete(turnId);
     // A Turn that no pane watches must not keep accumulating delta buffers.
     for (const key of [`turn:${turnId}`, `turn:${turnId}:reasoning`]) {
       closedStreamKeys.add(key);
@@ -2010,6 +2018,10 @@ async function requestTurnCancel(turnId: string): Promise<{ ok: true } | { ok: f
       body: JSON.stringify({ clientCommandId: retryableCommandId(retryKey, "web-cancel") }),
     });
     retryCommandIds.delete(retryKey);
+    // Accepted: the Broker will enforce the stop. The Turn may stay
+    // `cancel_requested` until the native side settles, so release the composer
+    // and the rail now instead of spinning on a stop the operator already gave.
+    releasedTurnIds.add(turnId);
     return { ok: true };
   } catch (error) {
     renderTurn(turn);
@@ -2107,7 +2119,9 @@ async function stopAllAgentWork(): Promise<void> {
       true
     );
   }
-  syncSendButton();
+  // The rail and the button read `releasedTurnIds`, so both need a repaint once
+  // the fan-out settles: a confirmed stop must clear the rings immediately.
+  syncAgentActivity();
 }
 
 function renderSupervisionEvent(envelope: AIChatLinkEnvelope): void {
@@ -3075,6 +3089,7 @@ function clearTimelineView(): void {
   state.transientText.clear();
   state.paneLog = [];
   finishedAgents.clear();
+  releasedTurnIds.clear();
   syncAgentActivity();
   conversationTocButton.hidden = true;
   setConversationTocOpen(false);
@@ -4345,7 +4360,7 @@ function syncPaneHeaders(): void {
     return;
   }
   const agents = orderedAgents();
-  const working = new Set(activeTurnActorIds(state.turns.values()));
+  const working = new Set(workingActorIds());
   panes.forEach((pane, index) => {
     const shell = pane.shell;
     const value = formatPaneLens(pane.lens);
@@ -4706,7 +4721,7 @@ function renderComposerAgents(): void {
 function syncAgentActivity(): void {
   const railAgents = orderedAgents().filter(railEligible);
   const railIds = new Set(railAgents.map((agent) => agent.actorId));
-  const working = new Set(activeTurnActorIds(state.turns.values()));
+  const working = new Set(workingActorIds());
   for (const button of Array.from(
     composerAgents.querySelectorAll<HTMLButtonElement>(".composer-agent")
   )) {
@@ -4835,13 +4850,18 @@ function setTargetPickerOpen(open: boolean): void {
   first?.focus();
 }
 
+/** Agent ids that still hold the composer: in flight and not yet released by a stop. */
+function workingActorIds(): string[] {
+  return activeTurnActorIds(state.turns.values(), { releasedTurnIds });
+}
+
 /** The current conversation, not another workspace or a replayed history. */
 function isRoomWorking(): boolean {
-  return conversationView === null && activeTurnActorIds(state.turns.values()).length > 0;
+  return conversationView === null && workingActorIds().length > 0;
 }
 
 function syncSendButton(): void {
-  const workingCount = state.submitting ? 0 : activeTurnActorIds(state.turns.values()).length;
+  const workingCount = state.submitting ? 0 : workingActorIds().length;
   const next = sendButtonState({
     submitting: state.submitting,
     workingCount,
@@ -4850,9 +4870,9 @@ function syncSendButton(): void {
   });
   sendButton.disabled = next.disabled;
   sendButton.dataset.mode = next.mode;
-  // The spinner belongs to both busy modes: "a Turn is running" for stop,
-  // "the POST is in flight" for blocked.
-  sendButton.classList.toggle("is-working", next.mode !== "send");
+  // The ring means "work is happening right now". An idle composer with an empty
+  // draft is disabled, not busy, so it must keep the paper plane (D-053).
+  sendButton.classList.toggle("is-working", next.spinning);
   sendButton.setAttribute("aria-busy", String(next.ariaBusy));
   sendButton.title = next.title;
   sendButton.setAttribute("aria-label", next.ariaLabel);

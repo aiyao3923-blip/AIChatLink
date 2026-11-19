@@ -26,6 +26,13 @@ export interface SendButtonState {
   /** Only honest for a control that is actually blocked; a stop button is live. */
   readonly ariaBusy: boolean;
   readonly ariaLabel: string;
+  /**
+   * Whether to show the rotating ring instead of the paper plane. This is the
+   * whole point of the control: **a ring means work is happening right now**.
+   * An idle composer with an empty draft is disabled, not busy, so it must keep
+   * the plane — a permanently spinning button answers nothing (D-053).
+   */
+  readonly spinning: boolean;
 }
 
 const SEND: SendButtonState = {
@@ -34,7 +41,8 @@ const SEND: SendButtonState = {
   label: "发送",
   title: "发送给已选 Agent",
   ariaBusy: false,
-  ariaLabel: "发送"
+  ariaLabel: "发送",
+  spinning: false
 };
 
 function stopState(workingCount: number, stopping: boolean): SendButtonState {
@@ -49,7 +57,9 @@ function stopState(workingCount: number, stopping: boolean): SendButtonState {
     label: "终止",
     title,
     ariaBusy: stopping,
-    ariaLabel: `${title}（点击后本轮所有 Agent 立即收到取消）`
+    ariaLabel: `${title}（点击后本轮所有 Agent 立即收到取消）`,
+    // Work really is in flight; that is the only reason this ring exists.
+    spinning: true
   };
 }
 
@@ -61,7 +71,9 @@ export function sendButtonState(input: ComposerStateInput): SendButtonState {
       label: "发送",
       title: "正在提交…",
       ariaBusy: true,
-      ariaLabel: "正在提交"
+      ariaLabel: "正在提交",
+      // The POST itself is work, but it is bounded by one request.
+      spinning: true
     };
   }
   if (input.workingCount > 0) {
@@ -74,7 +86,9 @@ export function sendButtonState(input: ComposerStateInput): SendButtonState {
       label: "发送",
       title: "发送给已选 Agent",
       ariaBusy: false,
-      ariaLabel: "发送"
+      ariaLabel: "发送",
+      // Nothing is running: an empty draft is a disabled plane, never a spinner.
+      spinning: false
     };
   }
   return SEND;

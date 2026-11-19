@@ -101,3 +101,26 @@ describe("stop-everything target set", () => {
     ).toEqual(["turn:paused"]);
   });
 });
+
+describe("released turns", () => {
+  const turns = [
+    { turnId: "turn:a", targetActorId: "agent:one", status: "cancel_requested" },
+    { turnId: "turn:b", targetActorId: "agent:two", status: "running" }
+  ];
+
+  it("stops holding the composer once a stop was accepted", () => {
+    expect(activeTurnActorIds(turns)).toEqual(["agent:one", "agent:two"]);
+    expect(activeTurnActorIds(turns, { releasedTurnIds: new Set(["turn:a"]) })).toEqual([
+      "agent:two"
+    ]);
+    expect(
+      activeTurnActorIds(turns, { releasedTurnIds: new Set(["turn:a", "turn:b"]) })
+    ).toEqual([]);
+  });
+
+  it("ignores releases for Turns that no longer exist and keeps order stable", () => {
+    expect(
+      activeTurnActorIds(turns, { releasedTurnIds: new Set(["turn:gone"]) })
+    ).toEqual(["agent:one", "agent:two"]);
+  });
+});

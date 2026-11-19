@@ -25,18 +25,39 @@ export function isTerminalTurnStatus(status: string): boolean {
 export interface TurnActivityLike {
   readonly targetActorId: string;
   readonly status: string;
+  /** Present in the live view; lets callers exclude Turns already released. */
+  readonly turnId?: string;
+}
+
+export interface ActiveTurnOptions {
+  /**
+   * Turns whose cancellation was already accepted. They are still non-terminal
+   * in the store, but the operator asked for them to stop, so they must stop
+   * holding the composer and the activity rail (D-053).
+   */
+  readonly releasedTurnIds?: ReadonlySet<string>;
 }
 
 /**
  * Agent ids with at least one Turn that has not reached a terminal status, in
  * first-seen order. A queued Turn counts as work: its lane has not answered yet.
+ * Released Turns are skipped — "the ring means work is happening" only holds if
+ * a confirmed stop stops the ring too.
  */
-export function activeTurnActorIds(turns: Iterable<TurnActivityLike>): string[] {
+export function activeTurnActorIds(
+  turns: Iterable<TurnActivityLike>,
+  options: ActiveTurnOptions = {}
+): string[] {
+  const released = options.releasedTurnIds;
   const active: string[] = [];
   const seen = new Set<string>();
   for (const turn of turns) {
     const actorId = turn.targetActorId.trim();
     if (actorId.length === 0 || seen.has(actorId) || isTerminalTurnStatus(turn.status)) {
+      continue;
+    }
+    const turnId = turn.turnId?.trim() ?? "";
+    if (released !== undefined && turnId.length > 0 && released.has(turnId)) {
       continue;
     }
     seen.add(actorId);

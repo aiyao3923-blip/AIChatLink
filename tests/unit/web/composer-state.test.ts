@@ -5,12 +5,14 @@ import { planResumeAfterStop, sendButtonState } from "../../../web/composer-stat
 const idle = { submitting: false, workingCount: 0, draftLength: 0, stopping: false };
 
 describe("composer send/stop button", () => {
-  it("is a blocked send button when the draft is empty", () => {
+  it("is a blocked send button when the draft is empty — and keeps the plane", () => {
     expect(sendButtonState(idle)).toMatchObject({
       mode: "blocked",
       disabled: true,
       label: "发送",
-      ariaBusy: false
+      ariaBusy: false,
+      // An idle composer is disabled, not busy: the ring must never spin here.
+      spinning: false
     });
   });
 
@@ -19,7 +21,8 @@ describe("composer send/stop button", () => {
       mode: "send",
       disabled: false,
       label: "发送",
-      title: "发送给已选 Agent"
+      title: "发送给已选 Agent",
+      spinning: false
     });
   });
 
@@ -38,7 +41,8 @@ describe("composer send/stop button", () => {
       mode: "stop",
       disabled: false,
       label: "终止",
-      ariaBusy: false
+      ariaBusy: false,
+      spinning: true
     });
     expect(state.title).toContain("终止全部 2 个 Agent");
     expect(state.ariaLabel).toContain("终止全部 2 个 Agent");
@@ -51,6 +55,14 @@ describe("composer send/stop button", () => {
       ariaBusy: true,
       title: "正在终止本轮所有 Agent…"
     });
+  });
+
+  it("spins again while the stop requests are still outstanding", () => {
+    expect(
+      sendButtonState({ ...idle, submitting: false, workingCount: 0, draftLength: 0, stopping: false })
+        .spinning
+    ).toBe(false);
+    expect(sendButtonState({ ...idle, workingCount: 2, stopping: true }).spinning).toBe(true);
   });
 
   it("counts an unknown working state as one Agent instead of printing a NaN", () => {

@@ -1141,6 +1141,59 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 输入器内容等于原文、`#reply-context` 可见且指向该消息、字数统计为 15、状态行为
 「已终止；原任务已放回输入框，补充后可直接发送」；已有草稿时点终止则草稿一字不改。
 
+## D-053：转圈只表示「现在真的有任务在跑」，终止被受理即释放
+
+触发证据：2026-11-19 用户截图（`PixPin_2026-11-19_11-12-21.png`）——房间已空闲、
+时间线全是「已完成」，输入器空草稿，发送键却是灰底 + 旋转环，而且一直转。
+用户的原话：「转圈代表真的有任务在完成才会转圈……不是让你一直转圈。逻辑要合理啊？」
+
+核对实现后发现**两个**错误，都属于「环的含义被稀释」：
+
+1. `syncSendButton()` 写的是 `classList.toggle("is-working", next.mode !== "send")`：
+   空草稿的 `blocked`（禁用发送）也被当成 busy，纸飞机被换成旋转环，于是**空闲页面永久转圈**。
+   实测：`mode=blocked, disabled=true` 时 `is-working` 仍在、`.send-spinner` `display:block`
+   且 `getAnimations()` 有 1 条 running。
+2. 点了终止之后，Turn 在 store 里仍是 `cancel_requested`（要等 native 侧收敛），
+   而忙碌口径把它算作在飞，于是**用户已经喊停，环还在转、发送还锁着**——这与「我停了它」
+   的直觉相反，也堵住了 D-052 的「改完再发」。
+
+决定：
+
+1. **`spinning` 是状态机的显式字段**，不再由 CSS 类名推断：`send | blocked` 一律「纸飞机」，
+   只有 `stop`（真有 Turn 在飞）与 `submitting`（POST 在途）为 `true`。
+   空草稿的禁用态**永远是纸飞机**：禁用 ≠ 忙碌。
+2. **`releasedTurnIds`：取消被受理即释放**。`requestTurnCancel()` 在 Broker 接受
+   （`ok`）后把 turnId 记入释放集，`workingActorIds()`（按钮、活动栏、窗格头三处共用）
+   跳过这些 Turn。于是点了终止 → 环立刻停、按钮立刻回到「发送」、原任务已在输入框里可继续补写。
+   若取消**失败**，Turn 不释放，环继续转并在状态行报错（可重试）——这只在真出错时发生。
+3. **释放不伪造终态**：Turn 仍是 `cancel_requested`，卡片继续显示「正在取消」，native 收敛后
+   按真实事件写 `turn.cancelled`；释放集在该 Turn 进入终态或视图重置（`clearTimelineView`）时清空。
+4. **不轮询 `/api/health.activeTurns`**（D-044 第 2 条仍然有效）：释放是本地命令回执，不是全局状态。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 保持锁定直到 `turn.cancelled` 落地 | 用户已喊停却还在转圈/锁发送，正是本次报告的症状；native 慢时体验最差 |
+| 把禁用态的 `is-working` 只从 CSS 里删掉 | 不解决问题 2：点了终止仍会继续转，因为忙碌口径没变 |
+| 取消后直接把 Turn 标成 `cancelled` | 伪造终态，违反「终态由 Broker/native 事件决定」 |
+| 用轮询 health 判断「还有没有活」 | 全局数会锁住别的目录/对话，D-044 已否决 |
+
+原因：「环」是这个界面上唯一表示**正在干活**的信号，它必须严格等价于「有在飞 Turn」。
+一旦它在空闲时也转，用户就再也无法用它判断状态；而用户喊停之后，工作对操作员而言已经结束，
+剩下的是 native 侧的收尾，不该继续占用输入器。
+
+变更条件：若真实使用中 native 取消经常超时（取消受理后仍长时间占用 Agent 车道），
+应在卡片上显示「已受理，等待 native 收尾」而不是恢复锁定；若 Broker 将来返回
+「取消被拒」，则只有被拒的 Turn 保持未释放。
+
+完成标准：`npm run typecheck`、`npx vitest run`（含 `sendButtonState.spinning` 与
+`activeTurnActorIds({releasedTurnIds})` 断言）、`npm run build` 全通过；
+无头 Chrome 探针四态：
+空闲（空草稿）= `mode=blocked`、类名无 `is-working`、`.send-spinner` `display:none`、
+`getAnimations()` 为空、环 0 个；
+在飞 = `mode=stop`、spinner running、环数 = 在飞 Agent 数；
+点终止后 = `mode=send`、spinner 消失、环 0、草稿为原文、状态行提示可继续；
+后台 `turn.cancelled` 到达后 UI 不再变化。
+
 ## 决策变更规则
 
 任何 Accepted 决策变更必须同时提供：
