@@ -1568,6 +1568,106 @@
   overflow-y: auto;
 }
 
+/* Live Turn observation surface. It exists because durable records are written
+   at terminal time: switching conversations would otherwise leave a running
+   Turn with nothing to read. */
+.turn-progress-button {
+  margin-left: 6px;
+}
+
+.turn-progress-dialog {
+  width: min(calc(560 * var(--px)), calc(100vw - 32px));
+  overflow-y: auto;
+  padding-bottom: 16px;
+}
+
+.turn-progress-dialog > :not(.sheet-head) {
+  margin-left: 18px;
+  margin-right: 18px;
+}
+
+.turn-progress-meta {
+  margin-top: 12px;
+  margin-bottom: 0;
+  color: var(--muted);
+  font-size: var(--fs-12);
+}
+
+.turn-progress-section {
+  margin-top: 16px;
+}
+
+.turn-progress-section > h3,
+.turn-progress-section > summary {
+  margin: 0 0 6px;
+  color: var(--ink-2);
+  font-size: var(--fs-12);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.turn-progress-section > summary {
+  cursor: pointer;
+}
+
+.turn-progress-text,
+.turn-progress-reasoning {
+  max-height: calc(220 * var(--px));
+  overflow-y: auto;
+  padding: 8px 10px;
+  border-radius: var(--r-sm);
+  background: var(--well);
+  font-size: var(--fs-13);
+  line-height: 1.7;
+}
+
+.turn-progress-reasoning {
+  color: var(--ink-2);
+}
+
+.turn-progress-note {
+  margin: 0;
+  padding: 0;
+  color: var(--muted);
+  font-size: var(--fs-11);
+  list-style: none;
+}
+
+.turn-progress-tools {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: calc(220 * var(--px));
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.turn-progress-tool {
+  display: grid;
+  grid-template-columns: 44px 30px minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  font-size: var(--fs-11);
+  color: var(--ink-2);
+}
+
+.turn-progress-tool-stamp {
+  color: var(--faint);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.turn-progress-tool-label {
+  color: var(--accent);
+}
+
+.turn-progress-tool-detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cancel-button {
   margin-top: 4px;
   padding: 2px 8px;

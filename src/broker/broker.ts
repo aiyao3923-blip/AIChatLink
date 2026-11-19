@@ -5,7 +5,7 @@ import type {
   NativeSession
 } from "../adapters/types.js";
 import { AdapterRegistry } from "../adapters/registry.js";
-import type { ConversationSummary } from "../contracts/rest.js";
+import type { ConversationSummary, TurnProgress } from "../contracts/rest.js";
 import {
   asTransientEnvelope,
   BUILTIN_ACTORS,
@@ -117,6 +117,11 @@ const DEFAULT_PARTIAL_CHECKPOINT_CHARS = 4_096;
  * bootstrap is bounded: this is a tail, and the flag says it was cut.
  */
 const BOOTSTRAP_PARTIAL_CHARS = 2_000;
+/** Bounds for the live progress observation surface (never a durable record). */
+const PROGRESS_PARTIAL_CHARS = 2_000;
+const PROGRESS_REASONING_CHARS = 4_000;
+const PROGRESS_TOOL_LIMIT = 50;
+const PROGRESS_TOOL_SUMMARY_CHARS = 400;
 const DEFAULT_NATIVE_CANCEL_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 5_000;
 const MAX_EVENT_PAGE = 500;
@@ -402,6 +407,79 @@ export class AIChatLinkBroker {
       }
     }
     return outcome.result;
+  }
+
+  /**
+   * What an unfinished Turn is doing right now.
+   *
+   * Durable records are written at terminal time (reasoning/tool projections are
+   * a terminal transaction), so a page that reloads or switches conversations
+   * cannot replay the live process. This reads the in-process dispatch snapshot
+   * instead: bounded, never persisted, and honest about what it cannot know after
+   * a runtime restart.
+   */
+  turnProgress(turnId: string): TurnProgress {
+    this.#assertOpen();
+    const turn = this.#store.getTurn(turnId);
+    if (!turn) {
+      throw new AIChatLinkError("UNKNOWN_TARGET", "Turn does not exist", { turnId });
+    }
+    const active = this.#active.get(turnId);
+    const now = Date.parse(this.#clock.now());
+    const since = Date.parse(turn.startedAt ?? turn.queuedAt);
+    const elapsedMs =
+      Number.isFinite(now) && Number.isFinite(since) ? Math.max(0, now - since) : 0;
+    const queuePosition =
+      turn.status === "queued"
+        ? Math.max(
+            1,
+            this.#store
+              .listTurns({ status: "queued", targetActorId: turn.targetActorId })
+              .findIndex((candidate) => candidate.turnId === turnId) + 1
+          )
+        : null;
+    const partial = active?.partialText ?? turn.partialText ?? "";
+    const reasoning = active?.reasoningText ?? "";
+    const tools = (active?.toolProgress ?? [])
+      .slice(-PROGRESS_TOOL_LIMIT)
+      .map((entry) => ({
+        occurredAt: entry.occurredAt,
+        nativeType: entry.nativeType,
+        ...(entry.toolCallId === undefined ? {} : { toolCallId: entry.toolCallId }),
+        summary: this.#toolSummary(entry.details)
+      }));
+    return {
+      turnId: turn.turnId,
+      targetActorId: turn.targetActorId,
+      status: turn.status,
+      queuedAt: turn.queuedAt,
+      startedAt: turn.startedAt ?? null,
+      elapsedMs,
+      queuePosition,
+      partialText: partial.slice(-PROGRESS_PARTIAL_CHARS),
+      partialTextTruncated: partial.length > PROGRESS_PARTIAL_CHARS,
+      reasoning: reasoning.slice(-PROGRESS_REASONING_CHARS),
+      reasoningTruncated: reasoning.length > PROGRESS_REASONING_CHARS,
+      tools,
+      ...(turn.errorCode === undefined ? {} : { errorCode: turn.errorCode })
+    };
+  }
+
+  /** One-line, bounded projection of a native tool payload. */
+  #toolSummary(details: unknown): string {
+    let text: string;
+    if (typeof details === "string") text = details;
+    else {
+      try {
+        text = JSON.stringify(details) ?? "";
+      } catch {
+        text = "";
+      }
+    }
+    const collapsed = text.replace(/\s+/gu, " ").trim();
+    return collapsed.length > PROGRESS_TOOL_SUMMARY_CHARS
+      ? `${collapsed.slice(0, PROGRESS_TOOL_SUMMARY_CHARS)}…`
+      : collapsed;
   }
 
   contextUsage(roomId = this.#defaultRoomId): import("../memory/types.js").RoomContextUsage {

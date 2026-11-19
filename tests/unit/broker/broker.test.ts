@@ -3122,3 +3122,61 @@ describe.sequential("AIChatLinkBroker conversation continuity", () => {
     expect(foreign.active).toBe(false);
   });
 });
+
+describe.sequential("AIChatLinkBroker live Turn progress", () => {
+  it("reports what a running Turn has produced, bounded", async () => {
+    const release = deferred();
+    const fixture = createFixture({ clock: { now: () => "2026-08-11T00:00:11.000Z" } });
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      yield nativeEvent("codex", "reasoning.delta", { text: "先看目录结构" }, `${input.turnId}:r`);
+      yield nativeEvent("codex", "content.delta", { text: "第一段产出" }, `${input.turnId}:c`);
+      yield nativeEvent(
+        "codex",
+        "tool.started",
+        { name: "shell", args: { cmd: "ls -la" } },
+        `${input.turnId}:t1`
+      );
+      await release.promise;
+      yield nativeEvent("codex", "turn.completed", { content: "完成" }, `${input.turnId}:done`);
+    };
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "progress", to: ["agent:codex"], content: "开工" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await waitUntil(() => fixture.store.getTurn(turnId)?.status === "running");
+    await waitUntil(() => {
+      const progress = fixture.broker.turnProgress(turnId);
+      return progress.tools.length === 1 && progress.reasoning.length > 0;
+    });
+
+    const progress = fixture.broker.turnProgress(turnId);
+    expect(progress).toMatchObject({
+      turnId,
+      targetActorId: "agent:codex",
+      status: "running",
+      queuePosition: null,
+      partialText: "第一段产出",
+      partialTextTruncated: false,
+      reasoning: "先看目录结构",
+      reasoningTruncated: false
+    });
+    expect(progress.elapsedMs).toBeGreaterThan(0);
+    expect(progress.tools).toHaveLength(1);
+    expect(progress.tools[0]).toMatchObject({ nativeType: "tool.started" });
+    expect(progress.tools[0]!.summary).toContain("ls -la");
+
+    release.resolve();
+    await fixture.broker.waitForIdle();
+    // A finished Turn keeps its final status and stops claiming live activity.
+    expect(fixture.broker.turnProgress(turnId)).toMatchObject({ status: "completed" });
+  });
+
+  it("rejects an unknown Turn", () => {
+    const fixture = createFixture();
+    expect(() => fixture.broker.turnProgress("turn_missing")).toThrowError(
+      /Turn does not exist/u
+    );
+  });
+});

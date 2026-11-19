@@ -10,6 +10,7 @@ import type {
   CreateMessageAccepted,
   CreateMessageRequest,
   IdentityQuery,
+  TurnProgress,
   IdentityRecordContract,
   MemoryQuery,
   MemoryRecordContract,
@@ -179,6 +180,8 @@ export interface BrokerApi {
     request: CancelTurnRequest,
     signal: AbortSignal
   ): Awaitable<CancelTurnResult>;
+  /** Live progress of one Turn (observation only; never durable state). */
+  turnProgress(turnId: string, signal: AbortSignal): Awaitable<TurnProgress>;
   queryMemory(query: MemoryQuery, signal: AbortSignal): Awaitable<MemoryPage>;
   queryIdentity(query: IdentityQuery, signal: AbortSignal): Awaitable<IdentityPage>;
   rememberMemory(

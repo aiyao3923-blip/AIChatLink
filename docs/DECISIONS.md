@@ -1716,3 +1716,42 @@ HTTP 响应）。context reset 与 conversation delete 两条路径里是同样�
 通过；新增单测 `replaces every native session as one batch and finishes the others when one fails`
 断言三个 Adapter 的 `start:` 都先于任何 `end:` 出现，且其中一个抛错后其余仍被重启。
 耗时改善未在运行实例上测量（需重启运行进程），本条目只记录结构与记录到的空窗。
+
+## D-060：进行中的 Turn 单独开一个观测面（`GET /api/turns/:id/progress` + 「过程」按钮）
+
+触发证据：用户切换对话回来，只看到一张「总管 · 运行中 [取消]」空卡片，要求「加一个展示任务完成进度的按键，
+就在取消旁边」。
+
+核对实现：`turn.reasoning.recorded` / `tool.progress.recorded` 是**终态事务**写入的（D-046/协议不变量 9），
+`turn.content.delta` / `turn.reasoning.delta` / `tool.progress` 是 transient、不落库、不跨连接。
+因此一个**仍在跑**的 Turn 在被切走/刷新之后，durable 侧确实什么都没有——卡片只能显示状态。
+这不是回放 bug，是"不持久化逐 token 增量"这条不变量的直接结果。
+
+决定：
+
+1. **新增观测接口** `GET /api/turns/:turnId/progress`：读 Broker 进程内的 dispatch 快照
+   （`partialText` / `reasoningText` / `toolProgress` / `startedAt` / `queuePosition`），
+   全部有界（2000 / 4000 / 50 条 / 摘要 400 字符），工具详情压成一行摘要，不回显原始 payload。
+2. **它是观测面，不是持久记录**：进程重启后不可回读（重启本来就会先把未终态 Turn 收敛）；
+   已完成 Turn 返回最终 `status`/`errorCode`，不伪造过程。
+3. **UI 只加一个按钮**：非终态 Turn 的卡片头、`取消` 右侧的 `过程`，打开弹窗后 1.5s 轮询，
+   Turn 终态或弹窗关闭即停。不做常驻第二条时间线，不改忙碌键语义。
+4. **不新增持久化**：不落 delta、不加表、不改 Context Packet。观测面失效时页面只是看不到过程，
+   不影响任何 Turn 的推进。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 把 delta 落库，切回来直接重放 | 违反「不持久化逐 token 增量」，存储与回放成本远超收益 |
+| 只在 SSE 里补发最近的 transient | 断开就是断开，无法承诺历史；会让"能看到什么"依赖连接运气 |
+| 用 `turn.partialText` 的 checkpoint 代替过程 | 只有正文，没有推理与工具调用，回答不了"它在干什么" |
+| 把过程塞进主时间线常驻 | 与"推理默认折叠"和阅读列宽度冲突，且切走再切回仍需要额外数据源 |
+
+原因：用户要的是**运行中的可见性**，而这部分数据天然是易失的。承认它易失、单独开一个
+按需打开的观测面，比伪造一份持久过程诚实，也不会污染消息流。
+
+变更条件：若将来允许跨进程回读进行中态（例如 Broker 定期把 bounded 进度写进独立表），
+必须明确它与"终态事务写推理记录"的边界，避免同一件事有两份权威副本。
+
+完成标准：`npm run typecheck` 通过；`npm test`（77 文件 / 825 项）通过；
+`tests/unit/broker` 覆盖进行中快照（正文/推理/工具/时长）与未知 Turn；
+`tests/unit/web/server` 覆盖 200 与 405。

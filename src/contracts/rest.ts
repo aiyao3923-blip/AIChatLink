@@ -497,6 +497,35 @@ export const TurnProjectionSchema = z
   })
   .strict();
 
+export const TurnProgressToolSchema = z.strictObject({
+  occurredAt: z.string().min(1).max(64),
+  nativeType: z.enum(["tool.started", "tool.completed"]),
+  toolCallId: z.string().max(200).optional(),
+  /** Bounded, already-redacted one-line summary; never the raw payload. */
+  summary: z.string().max(400)
+});
+
+/**
+ * Live progress of one Turn. This is an observation surface, not durable state:
+ * it exists so an operator who switched conversations can still see what a
+ * running Turn is doing, without persisting token deltas.
+ */
+export const TurnProgressSchema = z.strictObject({
+  turnId: ReferenceIdSchema,
+  targetActorId: AgentActorIdSchema,
+  status: z.string().min(1).max(64),
+  queuedAt: z.string().min(1).max(64),
+  startedAt: z.string().min(1).max(64).nullable(),
+  elapsedMs: z.number().int().nonnegative(),
+  queuePosition: z.number().int().nonnegative().nullable(),
+  partialText: z.string().max(2_000),
+  partialTextTruncated: z.boolean(),
+  reasoning: z.string().max(4_000),
+  reasoningTruncated: z.boolean(),
+  tools: z.array(TurnProgressToolSchema).max(50),
+  errorCode: z.string().max(64).optional()
+});
+
 export const BootstrapResponseSchema = z.object({
   schema: z.literal("aichatlink.bootstrap/0.1"),
   room: z.object({
@@ -550,6 +579,7 @@ export type IdentityQuery = z.infer<typeof IdentityQuerySchema>;
 export type MemoryRecordContract = z.infer<typeof MemoryRecordSchema>;
 export type IdentityRecordContract = z.infer<typeof IdentityRecordSchema>;
 export type BootstrapResponse = z.infer<typeof BootstrapResponseSchema>;
+export type TurnProgress = z.infer<typeof TurnProgressSchema>;
 
 export function parseCreateMessageRequest(
   input: unknown,
@@ -676,6 +706,10 @@ export function parseMemoryPage(input: unknown): z.infer<typeof MemoryPageSchema
 
 export function parseIdentityPage(input: unknown): z.infer<typeof IdentityPageSchema> {
   return parseContractOutput(IdentityPageSchema, input);
+}
+
+export function parseTurnProgress(input: unknown): TurnProgress {
+  return parseContractOutput(TurnProgressSchema, input);
 }
 
 export function parseBootstrapResponse(input: unknown): BootstrapResponse {

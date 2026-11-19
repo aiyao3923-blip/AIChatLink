@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type {
   BootstrapResponse,
+  TurnProgress,
   CancelTurnRequest,
   CancelTurnResult,
   CompactContextRequest,
@@ -187,6 +188,24 @@ class FakeBroker implements BrokerApi {
   ): Awaitable<CancelTurnResult> {
     this.calls.push({ method: "cancelTurn", id: turnId, value: request });
     return { turnId, accepted: true, status: "cancelling" };
+  }
+
+  turnProgress(turnId: string, _signal: AbortSignal): Awaitable<TurnProgress> {
+    this.calls.push({ method: "turnProgress", id: turnId });
+    return {
+      turnId,
+      targetActorId: "agent:codex",
+      status: "running",
+      queuedAt: "2026-08-11T00:00:00.000Z",
+      startedAt: "2026-08-11T00:00:01.000Z",
+      elapsedMs: 1_000,
+      queuePosition: null,
+      partialText: "写了一半",
+      partialTextTruncated: false,
+      reasoning: "想一想",
+      reasoningTruncated: false,
+      tools: []
+    };
   }
 
   queryMemory(query: MemoryQuery, _signal: AbortSignal): Awaitable<MemoryPage> {
@@ -966,6 +985,19 @@ describe("AIChatLinkHttpServer", () => {
       status: "cancelling"
     });
     expect(broker.calls.at(-1)).toMatchObject({ method: "cancelTurn", id: "turn:1" });
+
+    const progress = await fetch(`${origin}/api/turns/turn%3A1/progress`);
+    expect(progress.status).toBe(200);
+    expect(await progress.json()).toMatchObject({
+      turnId: "turn:1",
+      status: "running",
+      partialText: "写了一半",
+      tools: []
+    });
+    expect(broker.calls.at(-1)).toMatchObject({ method: "turnProgress", id: "turn:1" });
+    expect((await fetch(`${origin}/api/turns/turn%3A1/progress`, { method: "POST" })).status).toBe(
+      405
+    );
 
     expect(
       (

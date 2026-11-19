@@ -366,6 +366,33 @@
       </section>
     </dialog>
 
+    <dialog
+      id="turn-progress-dialog"
+      class="sheet-dialog turn-progress-dialog"
+      aria-labelledby="turn-progress-title"
+    >
+      <header class="sheet-head">
+        <div>
+          <p class="eyebrow">Turn progress</p>
+          <h2 id="turn-progress-title">任务过程</h2>
+        </div>
+        <button id="turn-progress-close" class="icon-button" type="button" aria-label="关闭任务过程">×</button>
+      </header>
+      <p id="turn-progress-meta" class="turn-progress-meta">正在读取…</p>
+      <section class="turn-progress-section">
+        <h3>已产出</h3>
+        <div id="turn-progress-text" class="turn-progress-text"></div>
+      </section>
+      <details id="turn-progress-reasoning-section" class="turn-progress-section">
+        <summary>推理过程</summary>
+        <div id="turn-progress-reasoning" class="turn-progress-reasoning"></div>
+      </details>
+      <section class="turn-progress-section">
+        <h3>工具调用</h3>
+        <ul id="turn-progress-tools" class="turn-progress-tools"></ul>
+      </section>
+    </dialog>
+
     <dialog id="panes-dialog" class="sheet-dialog panes-dialog" aria-labelledby="panes-dialog-title">
       <header class="sheet-head">
         <div>

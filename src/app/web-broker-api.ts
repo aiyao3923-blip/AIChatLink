@@ -16,6 +16,7 @@ import type {
   RestartAgentAccepted,
   RestartAgentRequest,
   RoomContextUsage,
+  TurnProgress,
   RetractIdentityRequest,
   RetractMemoryRequest,
   SupersedeIdentityRequest,
@@ -30,7 +31,8 @@ import {
   parseCreateMessageAccepted,
   parseDeleteConversationResult,
   parseRoomContextResetResult,
-  parseRoomContextUsage
+  parseRoomContextUsage,
+  parseTurnProgress
 } from "../contracts/rest.js";
 import { TRANSPORT_LIFECYCLE, type AIChatLinkConfig } from "../config.js";
 import type { CommandSpec } from "../launch/command-spec.js";
@@ -70,6 +72,7 @@ type WebBrokerSurface = Pick<
   | "bootstrap"
   | "acceptMessage"
   | "cancelFromBinding"
+  | "turnProgress"
   | "contextUsage"
   | "listConversations"
   | "compactContextFromBinding"
@@ -288,6 +291,11 @@ export class AIChatLinkWebBrokerApi implements BrokerApi {
       accepted: result.accepted,
       status: result.status
     });
+  }
+
+  turnProgress(turnId: string, signal: AbortSignal): TurnProgress {
+    throwIfAborted(signal);
+    return parseTurnProgress(this.#broker.turnProgress(turnId));
   }
 
   queryMemory(query: MemoryQuery, signal: AbortSignal): MemoryPage {

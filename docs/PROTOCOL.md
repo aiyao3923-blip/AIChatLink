@@ -562,6 +562,8 @@ Content-Type: application/json
 
 `POST /api/turns/:turnId/cancel` 表达取消意图。Structured Adapter 调用 App Server/ACP 原生 cancel 或 interrupt，只作用于所属进程树。响应成功不等于 native CLI 已完成取消；最终结果由 SSE terminal event 确认。历史 Direct Turn 只返回其已持久终态，不启动旧 Adapter。
 
+`GET /api/turns/:turnId/progress` 返回**当前这一轮的进行中观测**：`status`、`queuedAt/startedAt/elapsedMs`、`queuePosition`、有界的 `partialText`（尾部 2000 字符 + 截断标志）、有界的 `reasoning`（尾部 4000 字符 + 截断标志）以及最多 50 条 `tools`（每条含 `occurredAt/nativeType/toolCallId?/summary`，`summary` 是压缩后的一行，不回显原始 payload）。它是**观测面，不是持久记录**：数据来自 Broker 进程内的 dispatch 快照，因此运行时重启后就不可回读（重启会先收敛未终态 Turn）；已完成 Turn 返回其最终 `status` 与 `errorCode`。未知 `turnId` 返回 `UNKNOWN_TARGET`。
+
 响应中的 `transport` 是 Broker 启动选择的只读快照。请求不得携带 `transport` 或 `access`；存在这些字段时返回 `INVALID_ENVELOPE`，不能按 Turn 改模式。
 
 ### 10.4 记忆与身份

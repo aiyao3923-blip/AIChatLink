@@ -16,6 +16,7 @@ import {
   parseBootstrapResponse,
   parseCancelTurnRequest,
   parseCancelTurnResult,
+  parseTurnProgress,
   parseCompactContextRequest,
   parseResetContextRequest,
   parseResumeConversationRequest,
@@ -1074,6 +1075,21 @@ export class AIChatLinkHttpServer {
           return;
         }
         return methodNotAllowed(response, ["GET", "POST"]);
+      }
+
+      const progressMatch = /^\/api\/turns\/([^/]+)\/progress$/u.exec(url.pathname);
+      if (progressMatch?.[1]) {
+        if (method !== "GET") return methodNotAllowed(response, ["GET"]);
+        const turnId = decodePathId(progressMatch[1]);
+        writeJson(
+          response,
+          200,
+          validateBrokerOutput(
+            parseTurnProgress,
+            await this.#options.broker.turnProgress(turnId, abort.signal)
+          )
+        );
+        return;
       }
 
       const cancelMatch = /^\/api\/turns\/([^/]+)\/cancel$/u.exec(url.pathname);

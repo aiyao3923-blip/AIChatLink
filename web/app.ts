@@ -324,6 +324,13 @@ const memorySubmit = byId<HTMLButtonElement>("memory-submit");
 const publicMemoryCount = byId<HTMLSpanElement>("public-memory-count");
 const publicMemorySection = byId<HTMLDetailsElement>("public-memory-section");
 const memoryToggle = byId<HTMLButtonElement>("memory-toggle");
+const turnProgressDialog = byId<HTMLDialogElement>("turn-progress-dialog");
+const turnProgressClose = byId<HTMLButtonElement>("turn-progress-close");
+const turnProgressMeta = byId<HTMLElement>("turn-progress-meta");
+const turnProgressText = byId<HTMLElement>("turn-progress-text");
+const turnProgressReasoningSection = byId<HTMLDetailsElement>("turn-progress-reasoning-section");
+const turnProgressReasoning = byId<HTMLElement>("turn-progress-reasoning");
+const turnProgressTools = byId<HTMLUListElement>("turn-progress-tools");
 const memoryDialog = byId<HTMLDialogElement>("memory-dialog");
 const memoryClose = byId<HTMLButtonElement>("memory-close");
 const themeToggle = byId<HTMLButtonElement>("theme-toggle");
@@ -2124,7 +2131,18 @@ function renderTurn(turn: TurnView, options: RenderTurnOptions = {}): void {
     cancel.addEventListener("click", () => {
       void cancelTurn(turn.turnId);
     });
-    header.append(cancel);
+    // A running Turn can be watched from any conversation: its durable records
+    // only appear at terminal time, so this opens the live observation surface.
+    const progress = document.createElement("button");
+    progress.type = "button";
+    progress.className = "cancel-button turn-progress-button";
+    progress.textContent = "过程";
+    progress.title = "查看这一轮正在做什么";
+    progress.setAttribute("aria-label", `查看${targetLabel}这一轮的任务过程`);
+    progress.addEventListener("click", () => {
+      void openTurnProgress(turn.turnId);
+    });
+    header.append(cancel, progress);
   }
   article.append(header);
 
@@ -2222,6 +2240,198 @@ async function requestTurnCancel(turnId: string): Promise<{ ok: true } | { ok: f
 async function cancelTurn(turnId: string): Promise<void> {
   const result = await requestTurnCancel(turnId);
   if (!result.ok) showGlobalError(result.message);
+}
+
+interface TurnProgressView {
+  turnId: string;
+  targetActorId: string;
+  status: string;
+  queuedAt: string;
+  startedAt: string | null;
+  elapsedMs: number;
+  queuePosition: number | null;
+  partialText: string;
+  partialTextTruncated: boolean;
+  reasoning: string;
+  reasoningTruncated: boolean;
+  tools: Array<{
+    occurredAt: string;
+    nativeType: string;
+    toolCallId?: string;
+    summary: string;
+  }>;
+  errorCode?: string;
+}
+
+/** How often the progress dialog re-reads a running Turn. */
+const TURN_PROGRESS_POLL_MS = 1_500;
+let turnProgressTurnId: string | null = null;
+let turnProgressTimer: number | null = null;
+
+function normalizeTurnProgress(value: unknown): TurnProgressView | null {
+  if (!isRecord(value)) return null;
+  const turnId = readStringField(value, "turnId");
+  if (!turnId) return null;
+  const tools: TurnProgressView["tools"] = [];
+  for (const entry of asArray(value.tools)) {
+    if (!isRecord(entry)) continue;
+    const occurredAt = readStringField(entry, "occurredAt");
+    const nativeType = readStringField(entry, "nativeType");
+    if (!occurredAt || !nativeType) continue;
+    const toolCallId = readStringField(entry, "toolCallId");
+    tools.push({
+      occurredAt,
+      nativeType,
+      ...(toolCallId ? { toolCallId } : {}),
+      summary: readStringField(entry, "summary")
+    });
+  }
+  const startedAt = readStringField(value, "startedAt");
+  const errorCode = readStringField(value, "errorCode");
+  return {
+    turnId,
+    targetActorId: readStringField(value, "targetActorId"),
+    status: readStringField(value, "status") || "unknown",
+    queuedAt: readStringField(value, "queuedAt"),
+    startedAt: startedAt || null,
+    elapsedMs: readNumberField(value, "elapsedMs") ?? 0,
+    queuePosition: readNumberField(value, "queuePosition"),
+    partialText: readStringField(value, "partialText"),
+    partialTextTruncated: readBooleanField(value, false, "partialTextTruncated"),
+    reasoning: readStringField(value, "reasoning"),
+    reasoningTruncated: readBooleanField(value, false, "reasoningTruncated"),
+    tools,
+    ...(errorCode ? { errorCode } : {})
+  };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) return `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} 时 ${String(minutes % 60).padStart(2, "0")} 分`;
+}
+
+function renderTurnProgress(view: TurnProgressView | null, failure = ""): void {
+  if (view === null) {
+    turnProgressMeta.textContent = failure || "这一轮暂时没有可读的进度。";
+    turnProgressText.replaceChildren();
+    turnProgressReasoning.replaceChildren();
+    turnProgressTools.replaceChildren();
+    return;
+  }
+  const agent = state.agents.get(view.targetActorId)?.displayName ?? view.targetActorId;
+  const parts = [`${agent} · ${humanStatus(view.status)}`, `已运行 ${formatElapsed(view.elapsedMs)}`];
+  if (view.queuePosition !== null) parts.push(`排队第 ${view.queuePosition} 位`);
+  if (view.errorCode) parts.push(view.errorCode);
+  turnProgressMeta.textContent = parts.join(" · ");
+
+  turnProgressText.replaceChildren();
+  if (view.partialText) {
+    if (view.partialTextTruncated) {
+      const note = document.createElement("p");
+      note.className = "turn-progress-note";
+      note.textContent = "只显示最近一段";
+      turnProgressText.append(note);
+    }
+    const body = document.createElement("div");
+    body.className = "event-content";
+    renderRichContent(body, view.partialText);
+    turnProgressText.append(body);
+  } else {
+    const empty = document.createElement("p");
+    empty.className = "turn-progress-note";
+    empty.textContent = "还没有产出正文。";
+    turnProgressText.append(empty);
+  }
+
+  turnProgressReasoningSection.hidden = view.reasoning.length === 0;
+  turnProgressReasoning.replaceChildren();
+  if (view.reasoning) {
+    if (view.reasoningTruncated) {
+      const note = document.createElement("p");
+      note.className = "turn-progress-note";
+      note.textContent = "只显示最近一段";
+      turnProgressReasoning.append(note);
+    }
+    const body = document.createElement("div");
+    body.className = "event-content";
+    renderRichContent(body, view.reasoning);
+    turnProgressReasoning.append(body);
+  }
+
+  turnProgressTools.replaceChildren();
+  if (view.tools.length === 0) {
+    const item = document.createElement("li");
+    item.className = "turn-progress-note";
+    item.textContent = "还没有工具调用。";
+    turnProgressTools.append(item);
+  }
+  for (const tool of view.tools) {
+    const item = document.createElement("li");
+    item.className = "turn-progress-tool";
+    const stamp = document.createElement("span");
+    stamp.className = "turn-progress-tool-stamp";
+    stamp.textContent = formatTime(tool.occurredAt);
+    const label = document.createElement("span");
+    label.className = "turn-progress-tool-label";
+    label.textContent =
+      tool.nativeType === "tool.started" ? "开始" : tool.nativeType === "tool.completed" ? "完成" : tool.nativeType;
+    const detail = document.createElement("span");
+    detail.className = "turn-progress-tool-detail";
+    detail.textContent = tool.summary;
+    item.append(stamp, label, detail);
+    turnProgressTools.append(item);
+  }
+}
+
+async function refreshTurnProgress(): Promise<void> {
+  const turnId = turnProgressTurnId;
+  if (turnId === null) return;
+  try {
+    const payload = await requestJson<unknown>(`/api/turns/${encodeURIComponent(turnId)}/progress`);
+    if (turnProgressTurnId !== turnId) return;
+    const view = normalizeTurnProgress(payload);
+    renderTurnProgress(view);
+    if (view !== null && TERMINAL_TURN_STATUSES.has(view.status)) stopTurnProgressPolling();
+  } catch (error) {
+    if (turnProgressTurnId !== turnId) return;
+    renderTurnProgress(null, errorMessage(error));
+    stopTurnProgressPolling();
+  }
+}
+
+function stopTurnProgressPolling(): void {
+  if (turnProgressTimer !== null) {
+    window.clearInterval(turnProgressTimer);
+    turnProgressTimer = null;
+  }
+}
+
+async function openTurnProgress(turnId: string): Promise<void> {
+  turnProgressTurnId = turnId;
+  turnProgressMeta.textContent = "正在读取…";
+  turnProgressText.replaceChildren();
+  turnProgressReasoning.replaceChildren();
+  turnProgressTools.replaceChildren();
+  if (typeof turnProgressDialog.showModal === "function") turnProgressDialog.showModal();
+  else turnProgressDialog.setAttribute("open", "");
+  stopTurnProgressPolling();
+  await refreshTurnProgress();
+  if (turnProgressTurnId !== turnId) return;
+  turnProgressTimer = window.setInterval(() => {
+    void refreshTurnProgress();
+  }, TURN_PROGRESS_POLL_MS);
+}
+
+function closeTurnProgress(): void {
+  turnProgressTurnId = null;
+  stopTurnProgressPolling();
+  if (typeof turnProgressDialog.close === "function") turnProgressDialog.close();
+  else turnProgressDialog.removeAttribute("open");
 }
 
 /**
@@ -6697,6 +6907,13 @@ memoryToggle.addEventListener("click", () => {
 memoryClose.addEventListener("click", () => {
   if (typeof memoryDialog.close === "function") memoryDialog.close();
   else memoryDialog.removeAttribute("open");
+});
+turnProgressClose.addEventListener("click", closeTurnProgress);
+// Esc and backdrop dismissal must also stop the poll, or a closed dialog would
+// keep re-reading a Turn forever.
+turnProgressDialog.addEventListener("close", () => {
+  turnProgressTurnId = null;
+  stopTurnProgressPolling();
 });
 
 initPanes();

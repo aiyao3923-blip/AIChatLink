@@ -138,6 +138,7 @@ function brokerFixture(): AIChatLinkWebBrokerApiOptions["broker"] {
     }),
     acceptMessage: unsupported,
     cancelFromBinding: unsupported,
+    turnProgress: unsupported as unknown as AIChatLinkWebBrokerApiOptions["broker"]["turnProgress"],
     queryMemory: () => [],
     queryIdentity: () => [],
     rememberMemory: unsupported,
