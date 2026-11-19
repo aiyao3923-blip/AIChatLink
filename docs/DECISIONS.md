@@ -1397,3 +1397,41 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 811 项）通过；
 `tests/unit/broker/broker.test.ts` 新增 1 项（reset 切断的 Turn，其对话 `endSeq` 到达终态事件）；
 用真实工作区库的副本验证 `conv:1` 由 `endSeq 4` 变为 `15`（含 reasoning/tool/cancel）。
+
+---
+
+## D-058：对话切换不整页重载——先取数，再一次重绘
+
+触发证据：用户反馈「切换对话时一直频闪，做不到丝滑」。截图指向 Web 界面左栏对话列表。
+核对实现得到两处空窗：`exitConversationView()` 用 `window.location.reload()` 回到活纪元
+（整页白闪 + EventSource 重连 + 侧栏重建）；`enterConversationView()` 先 `clearTimelineView()`
+再 `await loadEventRange()`（最长 6 秒的空列，回放内容逐条追加）。
+
+决定：
+
+1. **同房间的对话切换不重载**。`回到当前对话` 走 `rebuildLiveEpoch()`：先取 `/api/bootstrap`
+   快照与 resume 种子，再清空并同步重绘；SSE 连接与 seq 游标保持不动。
+2. **先取数，后清空**。进入回放同样先 `await` 完全部区间再 `clearTimelineView()`；
+   清空与绘制之间不允许出现 `await`——那段空窗就是被看见的频闪。
+3. **重建期间的 live 帧排队**。`liveEnvelopeBuffer` 把快照与重绘之间到达的帧按序补放，
+   否则流式 delta 会在这段窗口里丢失（这是「不重载」必须付的代价）。
+4. **重建 = 一次刷新**。`retiredTurnIds` 清空后由快照窗口重建；已见 `eventId` 在重绘前显式删除，
+   否则 `acceptEnvelope` 的幂等去重会让整段活纪元画不出来。
+5. **首次加载与原地重建共用 `paintLiveEpoch()`**。两条渲染路径只保留一份实现，避免刷新与切换漂移。
+6. **跨 workspace 仍整页重载**（D-041）：seq 空间不同，游标不能复用。
+7. **兜底**：`/api/bootstrap` 失败时退回 `location.reload()`，原地重建只是优化，不是唯一路径。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 只加淡入淡出遮罩 | 白闪变灰闪，重载成本与 SSE 重连仍在 |
+| 保留 reload，改用 View Transition | 跨文档不生效 |
+| 只改 URL 不重建时间线 | 视图仍显示回放内容，与事实源不一致 |
+| 重建期间关闭 EventSource 再重连 | 连接指示器抖动，且引入重连窗口 |
+
+原因：视图切换不该再付一次整页启动的代价；但「不重载」不能建立在假设上，
+必须让重建路径与刷新路径共用同一个渲染函数，并把 live 帧的竞态显式排队。
+
+完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 811 项）通过；`npm run build` 通过。
+真实实例（4310）三条路径实测——回放→活、活→回放、再回放→活：
+`performance.getEntriesByType("navigation").length === 1`（无重载），
+rAF 逐帧采样 `emptyFrames === 0`（时间线从未空帧），URL 的 `?conv=` 与 `is-viewing` 同步正确。

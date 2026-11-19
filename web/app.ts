@@ -3925,18 +3925,21 @@ async function enterConversationView(conversation: ConversationSummary): Promise
   conversationView = { conversation, ranges: conversationRanges(conversation) };
   syncViewedConversationParam(conversation.conversationId);
   syncConversationSelection();
-  clearTimelineView();
-  // After the view has been rebuilt: the restore rewrites the composer, and the
-  // send button it syncs must see the new view's (empty) Turn bookkeeping.
-  restoreDraft();
   syncViewingBanner();
   messageInput.focus();
   const ranges = conversationView.ranges;
+  // Load the whole replay before touching the DOM: clearing first left the
+  // column blank for the length of the EventSource round-trip, which read as a
+  // flash on every switch.
   const played = await Promise.all(ranges.map((range) => loadEventRange(range)));
   if (token !== conversationViewToken || conversationView === null) return;
   const events = played
     .flat()
     .sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
+  clearTimelineView();
+  // After the view has been rebuilt: the restore rewrites the composer, and the
+  // send button it syncs must see the new view's (empty) Turn bookkeeping.
+  restoreDraft();
   for (const envelope of events) {
     // Events accepted live while another conversation was on screen were never
     // rendered; replaying this conversation must paint them after all.
@@ -4042,7 +4045,49 @@ function exitConversationView(): void {
   syncViewedConversationParam(null);
   syncConversationSelection();
   viewingBanner.hidden = true;
-  window.location.reload();
+  void rebuildLiveEpoch();
+}
+
+/**
+ * Repaint the live epoch in place. A reload shows the same transcript, but it
+ * also flashes the whole shell and throws away the SSE cursor for a swap that
+ * never left this room. Workspace switches still reload (D-041): their seq space
+ * is a different one.
+ */
+async function rebuildLiveEpoch(): Promise<void> {
+  const token = conversationViewToken;
+  const buffered: AIChatLinkEnvelope[] = [];
+  liveEnvelopeBuffer = buffered;
+  try {
+    const decoded = await requestJson<unknown>("/api/bootstrap");
+    if (!isRecord(decoded)) {
+      throw new ApiFailure("INVALID_BOOTSTRAP", "bootstrap 响应不是对象", 500);
+    }
+    // A rebuild is a fresh page as far as the timeline is concerned: retired
+    // turns come back from the replay window, not from the view being replaced.
+    retiredTurnIds.clear();
+    if (!(await paintLiveEpoch(decoded, () => token === conversationViewToken))) {
+      liveEnvelopeBuffer = null;
+      return;
+    }
+    restoreDraft();
+    for (const pane of panes) {
+      pane.follow.resume(false);
+      pane.follow.scrollToLatest(false);
+    }
+    syncConversationToc();
+    void refreshConversations();
+    void refreshContextUsage();
+  } catch {
+    // The in-place path is an optimization; the reload is the proven one.
+    liveEnvelopeBuffer = null;
+    window.location.reload();
+    return;
+  }
+  liveEnvelopeBuffer = null;
+  for (const envelope of buffered) {
+    acceptEnvelope(envelope, "live");
+  }
 }
 
 function appendResumeBoundary(conversation: ConversationSummary): void {
@@ -5421,6 +5466,13 @@ function handleSseMessage(event: MessageEvent<string>): void {
     showGlobalError("收到不完整的 AIChatLink Envelope");
     return;
   }
+  // A view rebuild replaces the timeline from a snapshot. Frames that land while
+  // it runs are held, not dropped: a streaming response would otherwise lose
+  // every delta between the snapshot and the repaint.
+  if (liveEnvelopeBuffer !== null) {
+    liveEnvelopeBuffer.push(envelope);
+    return;
+  }
   acceptEnvelope(envelope, "live");
 }
 
@@ -5687,6 +5739,64 @@ function connectEventSource(extraTypes: string[] = []): void {
   };
 }
 
+/** Live frames held while a view rebuild replaces the timeline. */
+let liveEnvelopeBuffer: AIChatLinkEnvelope[] | null = null;
+
+/**
+ * Paint the open conversation epoch from a `/api/bootstrap` snapshot. First load
+ * and an in-place return to live share this renderer, so the two cannot drift.
+ *
+ * Everything that can be awaited is fetched *before* `clearTimelineView()`: an
+ * await after the clear leaves the column blank, which is the flash operators
+ * saw on every conversation switch. Returns false when the caller's view was
+ * replaced while the seed was loading (a faster click wins).
+ */
+async function paintLiveEpoch(
+  decoded: Record<string, unknown>,
+  isCurrent: () => boolean = () => true
+): Promise<boolean> {
+  const room = isRecord(decoded.room) ? decoded.room : {};
+  const replayWindow = extractCollection(decoded, ["recentEvents", "events"])
+    .map(normalizeEnvelope)
+    .filter((event): event is AIChatLinkEnvelope => event !== null)
+    .sort((left, right) => (left.seq ?? Number.MAX_SAFE_INTEGER) - (right.seq ?? Number.MAX_SAFE_INTEGER));
+  const activeConversation = conversations.find((conversation) => conversation.active) ?? null;
+  const resumeSeed = activeConversation?.resumedFrom ?? null;
+  // The seed predates the recent replay window, so it needs its own fetch.
+  const seedEvents =
+    activeConversation !== null && resumeSeed !== null
+      ? await loadEventRange({ fromSeq: resumeSeed.fromSeq, throughSeq: resumeSeed.throughSeq })
+      : [];
+  if (!isCurrent()) return false;
+
+  clearTimelineView();
+  seedRetiredTurnIds(replayWindow);
+  // Seen ids survive a clear, so a rebuilt epoch has to be re-opened explicitly.
+  for (const envelope of seedEvents) {
+    state.seenEventIds.delete(envelope.eventId);
+    acceptEnvelope(envelope, "replay");
+  }
+  if (activeConversation !== null && resumeSeed !== null) {
+    appendResumeBoundary(activeConversation);
+  }
+  for (const envelope of replayWindow) {
+    state.seenEventIds.delete(envelope.eventId);
+    acceptEnvelope(envelope, "bootstrap");
+  }
+  for (const value of extractCollection(decoded, ["activeTurns", "turns"])) {
+    const turn = normalizeTurn(value);
+    if (turn) {
+      renderTurn(turn);
+    }
+  }
+  const throughSeq = readNumberField(room, "throughSeq") ?? readNumberField(decoded, "throughSeq") ?? 0;
+  if (Number.isSafeInteger(throughSeq) && throughSeq >= 0) {
+    state.lastDurableSeq = Math.max(state.lastDurableSeq, throughSeq);
+  }
+  refreshEmptyStateCopy();
+  return true;
+}
+
 async function bootstrap(): Promise<void> {
   setConnection("bootstrapping");
   renderAgents();
@@ -5719,39 +5829,10 @@ async function bootstrap(): Promise<void> {
     paneRosterReady = true;
     renderAgents();
 
-    const replayWindow = extractCollection(decoded, ["recentEvents", "events"])
-      .map(normalizeEnvelope)
-      .filter((event): event is AIChatLinkEnvelope => event !== null)
-      .sort((left, right) => (left.seq ?? Number.MAX_SAFE_INTEGER) - (right.seq ?? Number.MAX_SAFE_INTEGER));
     // The room transcript is append-only, so a reload would otherwise replay the
     // closed conversation that the operator just replaced.
-    seedRetiredTurnIds(replayWindow);
     openConversationEpoch(activeEpochStartSeq(conversations));
-    const activeConversation =
-      conversations.find((conversation) => conversation.active) ?? null;
-    const resumeSeed = activeConversation?.resumedFrom ?? null;
-    if (activeConversation !== null && resumeSeed !== null) {
-      // The seed predates the recent replay window; it has to be fetched on its
-      // own and rendered first, or the resumed conversation would open blank.
-      const seedEvents = await loadEventRange({
-        fromSeq: resumeSeed.fromSeq,
-        throughSeq: resumeSeed.throughSeq
-      });
-      for (const envelope of seedEvents) {
-        acceptEnvelope(envelope, "replay");
-      }
-      appendResumeBoundary(activeConversation);
-    }
-    for (const envelope of replayWindow) {
-      acceptEnvelope(envelope, "bootstrap");
-    }
-
-    for (const value of extractCollection(decoded, ["activeTurns", "turns"])) {
-      const turn = normalizeTurn(value);
-      if (turn) {
-        renderTurn(turn);
-      }
-    }
+    await paintLiveEpoch(decoded);
 
     for (const value of extractCollection(decoded, ["memory", "memories"])) {
       const record = normalizeRecord(value, false);
