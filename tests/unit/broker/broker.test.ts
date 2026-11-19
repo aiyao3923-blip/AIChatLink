@@ -2744,3 +2744,75 @@ describe.sequential("AIChatLinkBroker bootstrap Turn projection", () => {
     await fixture.broker.waitForIdle();
   });
 });
+
+describe.sequential("AIChatLinkBroker conversation projection across a reset", () => {
+  it("keeps a Turn cut by a reset with the conversation it started in", async () => {
+    const usage = conversationUsage();
+    let fixtureStore: SqliteAIChatLinkStore | undefined;
+    const fixture = createFixture({
+      closeTimeoutMs: 30,
+      agentController: {
+        restart: async () => undefined,
+        restartFresh: async () => undefined
+      },
+      contextController: {
+        inspectUsage: () => usage,
+        compactNow: async () => ({ compacted: false, usage }),
+        resetNow: (roomId: string, resetNativeSessions?: boolean) => {
+          const throughSeq = fixtureStore!.getRoomHighWaterSeq(roomId);
+          fixtureStore!.recordContextReset({
+            roomId,
+            throughSeq,
+            ...(resetNativeSessions === undefined ? {} : { resetNativeSessions })
+          });
+          return {
+            reset: true,
+            throughSeq,
+            resetNativeSessions: resetNativeSessions === true,
+            usage
+          };
+        },
+        resumeNow: () => {
+          throw new Error("resumeNow is not exercised by this test");
+        }
+      }
+    });
+    fixtureStore = fixture.store;
+    // A stream that ignores the abort: the session swap has to write the
+    // terminal record itself.
+    fixture.adapters.codex.handler = async function* (_session, input) {
+      yield nativeEvent("codex", "turn.started", {}, `${input.turnId}:start`);
+      await new Promise<void>(() => undefined);
+    };
+
+    const accepted = await fixture.broker.acceptMessage({
+      bindingId: "binding:web",
+      request: { clientCommandId: "cut-turn", to: ["agent:codex"], content: "分析一下" }
+    });
+    const turnId = accepted.turns[0]!.turnId;
+    await waitUntil(() => fixture.store.getTurn(turnId)?.status === "running");
+
+    await fixture.broker.resetContextFromBinding({
+      bindingId: "binding:web",
+      clientCommandId: "cut-reset",
+      roomId: "room:main",
+      resetNativeSessions: true
+    });
+
+    // The reset wrote its boundary first, then the in-flight Turn was settled.
+    const boundary = fixture.store.getLatestContextResetThroughSeq("room:main");
+    const turn = fixture.store.getTurn(turnId)!;
+    expect(turn.status).toBe("interrupted");
+    const terminalEvent = fixture.store.getEvent(turn.terminalEventId!)!;
+    expect(terminalEvent.seq).toBeGreaterThan(boundary);
+
+    const cut = fixture.broker
+      .listConversations("room:main")
+      .find((entry) => entry.startSeq === 1)!;
+    expect(cut.active).toBe(false);
+    // The projection reaches the Turn's own terminal event, so replaying this
+    // conversation shows the interruption (with its reasoning/tool records)
+    // instead of an empty forever-"running" card.
+    expect(cut.endSeq).toBe(terminalEvent.seq);
+  });
+});

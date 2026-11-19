@@ -878,6 +878,17 @@ export interface AIChatLinkStore {
   replaceActiveSummary(input: ReplaceRoomSummaryInput): SummaryRecord;
   recoverAfterRestart(now?: string): RecoveryResult;
   /**
+   * Highest sequence of a terminal event belonging to a Turn queued inside the
+   * given range. A Turn cut by a context reset writes its tail after the
+   * boundary; the conversation projection uses this to keep that tail with the
+   * conversation the Turn started in.
+   */
+  latestTurnTerminalSeq(input: {
+    roomId: string;
+    fromSeq: number;
+    throughSeq: number;
+  }): number | undefined;
+  /**
    * Force specific non-terminal Turns to a durable `interrupted` terminal.
    * Used when the caller can prove nothing is driving them: a cancelled Turn
    * whose lane holds no dispatch, or a session swap that outlived its bound.

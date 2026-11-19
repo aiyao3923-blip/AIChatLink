@@ -3944,6 +3944,7 @@ async function enterConversationView(conversation: ConversationSummary): Promise
     acceptEnvelope(envelope, "replay");
   }
   if (conversationView === null) return;
+  settleClosedConversationTurns();
   appendConversationBoundary(`以上为「${conversation.title}」的历史记录`);
   refreshEmptyStateCopy();
   for (const pane of panes) {
@@ -3988,6 +3989,23 @@ function loadEventRange(range: { fromSeq: number; throughSeq: number }): Promise
     source.onerror = finish;
     window.setTimeout(finish, 6_000);
   });
+}
+
+/**
+ * A closed conversation cannot still be running. If a Turn's terminal frame is
+ * missing from the replayed range (it was cut by an epoch boundary, or written
+ * by a build that filed it elsewhere), "interrupted" is the honest state: a
+ * forever-spinning card also holds the composer hostage.
+ */
+function settleClosedConversationTurns(): void {
+  for (const turn of [...state.turns.values()]) {
+    if (TERMINAL_TURN_STATUSES.has(turn.status)) continue;
+    const settled: TurnView = { ...turn, status: "interrupted" };
+    state.turns.set(turn.turnId, settled);
+    releasedTurnIds.add(turn.turnId);
+    renderTurn(settled);
+  }
+  syncAgentActivity();
 }
 
 function appendConversationBoundary(text: string): void {

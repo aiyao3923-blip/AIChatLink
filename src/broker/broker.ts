@@ -463,13 +463,26 @@ export class AIChatLinkBroker {
         new Date(0).toISOString();
       const conversationId = `conv:${startSeq}`;
       titles.set(conversationId, title);
+      // A Turn that was cut by the boundary keeps writing into the next epoch
+      // (reasoning, tool records, turn.interrupted). Those events belong to the
+      // conversation the Turn started in: without them the old conversation
+      // shows a permanently "running" card and the record is unreachable from
+      // either side. Extending the replay range is a projection rule only — the
+      // transcript is never rewritten and epoch membership (startSeq of the
+      // next conversation) does not move.
+      const tailEndSeq =
+        endSeq === null
+          ? undefined
+          : this.#store.latestTurnTerminalSeq({ roomId, fromSeq: startSeq, throughSeq: endSeq });
+      const shownEndSeq =
+        endSeq === null || tailEndSeq === undefined ? endSeq : Math.max(endSeq, tailEndSeq);
       conversations.push({
         conversationId,
         title,
         startSeq,
-        endSeq,
+        endSeq: shownEndSeq,
         startedAt,
-        active: endSeq === null,
+        active: shownEndSeq === null,
         empty: !hasMessages,
         resumedFrom:
           resume === undefined
@@ -588,10 +601,18 @@ export class AIChatLinkBroker {
     // seeded with, otherwise the second hop silently drops the original
     // conversation. Its own seed already starts at the origin, so one hop is
     // enough to reach it.
+    //
+    // `endSeq` may have been extended past the epoch boundary to keep a cut
+    // Turn's tail with its own conversation. A resumed range still has to end
+    // before the room high-water mark (otherwise it would cover the live epoch
+    // itself), so clamp it there.
+    const fromSeq = target.resumedFrom?.fromSeq ?? target.startSeq;
+    const highWaterSeq = this.#store.getRoomHighWaterSeq(roomId);
+    const clampedEnd = Math.min(target.endSeq, Math.max(1, highWaterSeq - 1));
     const resume = {
       conversationId: target.conversationId,
-      fromSeq: target.resumedFrom?.fromSeq ?? target.startSeq,
-      throughSeq: target.endSeq
+      fromSeq,
+      throughSeq: clampedEnd >= fromSeq ? clampedEnd : target.endSeq
     };
     const resetNativeSessions = input.resetNativeSessions === true;
     const command = this.#store.beginClientCommand<

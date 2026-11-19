@@ -1359,3 +1359,41 @@ D-050 只做到「停」，停下之后输入框是空的：用户要改一句�
 完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 810 项）通过；
 `tests/unit/broker/broker.test.ts` 新增 2 项（小文本原样投影、超限时取尾部并标记截断，
 且终态后不再出现在 activeTurns）；契约 `TurnProjectionSchema` 覆盖新字段。
+
+## D-057：被边界切断的 Turn，其尾巴仍归它发起的那段对话
+
+触发证据：用户切回旧对话，看到「总管 · 运行中 [取消]」一张空卡片，问「问题分析解决的记录呢？现在啥都不显示了」。
+核对真实库（`ws_5bfb37400d97`）得到：该 Turn 在 `12:06:03` 起跑，`12:06:15` 被 `turn.cancelled` 结束；
+而 `context.reset`（`throughSeq=4`）落在 seq 5，于是 Turn 的
+`turn.reasoning.recorded`（seq 6）、9 条 `tool.progress.recorded`（seq 7–15）与 `turn.cancelled`（seq 15）
+全部写在边界之后，**物理上属于下一个纪元**。结果：
+- 旧对话回放区间是 1..4，只能画出用户消息 + `turn.started` → 永远「运行中」；
+- 新对话虽然包含 6..15，但 `retiredTurnIds`（`seedRetiredTurnIds`）把它们当作"已放弃回合"隐藏。
+
+记录没丢，是**归档位置与可见性都错了**。
+
+决定：
+
+1. **对话投影向后延伸**：`listConversations` 对已关闭纪元取
+   `endSeq = max(boundary, 该纪元内发起 Turn 的终态事件 seq)`（`store.latestTurnTerminalSeq`，
+   一条聚合 SQL，不扫全表）。因此旧对话能回放自己的推理、工具记录与终态。
+2. **只改读模型**：不重写事件、不移动下一纪元的 `startSeq`、不改 Context Packet 的归属。
+   区间可以重叠，重叠正是"这些事件属于那段工作"的诚实表达。
+3. **续聊仍然只到当前边界之前**：`conversations/resume` 在构造种子时把 `throughSeq` 夹到
+   `highWater - 1`，避免延伸后的终点覆盖 live 纪元（`resumeNow` 的既有校验不变）。
+4. **前端兜底**：进入已关闭对话后，回放结束时仍非终态的 Turn 一律渲染为「已中断」并释放忙锁
+   —— 一段已关闭的对话不可能还在跑，这是旧数据（本次修复前写入的）唯一诚实的呈现。
+
+| 被否决的方案 | 否决理由 |
+| :--- | :--- |
+| 把尾巴事件的 seq 改写成边界内 | 破坏 append-only 与 seq 单调性，属于重写历史 |
+| 让 `retiredTurnIds` 放行，尾巴显示在新对话里 | 新对话会凭空出现一段属于别人上下文的工作，且刷新后行为不稳定 |
+| 旧对话只显示「已中断」不显示记录 | 用户要的是「分析记录」，藏起来等于仍然丢失 |
+| 在 `turn.interrupted` 里补写 content | 该 Turn 从未产出正文（`partial_text` 为空），补写只能伪造内容 |
+
+原因：对话是**工作**的容器，不是「seq 落在哪一段」的容器。一个 Turn 在边界前起跑，
+它的全部证据就该跟它走；否则边界一次点击就能让证据从两侧同时消失。
+
+完成标准：`npm run typecheck` 通过；`npm test`（76 文件 / 811 项）通过；
+`tests/unit/broker/broker.test.ts` 新增 1 项（reset 切断的 Turn，其对话 `endSeq` 到达终态事件）；
+用真实工作区库的副本验证 `conv:1` 由 `endSeq 4` 变为 `15`（含 reasoning/tool/cancel）。

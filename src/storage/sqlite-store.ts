@@ -3472,6 +3472,38 @@ export class SqliteAIChatLinkStore implements AIChatLinkStore {
     );
   }
 
+  /**
+   * Highest sequence of a terminal event that belongs to a Turn *queued* inside
+   * `[fromSeq, throughSeq]`.
+   *
+   * A Turn that is cut by a context reset keeps writing after the boundary: its
+   * reasoning, tool records and `turn.interrupted` land in the next epoch. The
+   * conversation projection uses this to keep those events with the
+   * conversation the Turn started in, instead of stranding them behind a
+   * forever-"running" card.
+   */
+  latestTurnTerminalSeq(input: {
+    roomId: string;
+    fromSeq: number;
+    throughSeq: number;
+  }): number | undefined {
+    this.#assertOpen();
+    const row = this.#database
+      .prepare(`
+        SELECT MAX(terminal.seq) AS seq
+        FROM turns AS turn
+        JOIN events AS queued ON queued.event_id = turn.queued_event_id
+        JOIN events AS terminal ON terminal.event_id = turn.terminal_event_id
+        WHERE queued.room_id = ?
+          AND queued.seq >= ?
+          AND queued.seq <= ?
+          AND terminal.seq > ?
+      `)
+      .get(input.roomId, input.fromSeq, input.throughSeq, input.throughSeq) as Row | undefined;
+    const seq = row?.seq;
+    return typeof seq === "number" ? seq : undefined;
+  }
+
   recoverAfterRestart(now = nowIso()): RecoveryResult {
     this.#assertOpen();
     return this.#withImmediateTransaction(() => {
